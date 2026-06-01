@@ -6,7 +6,7 @@ score. No LLM or external service is involved — logic is fully transparent
 and auditable.
 """
 
-from datetime import date
+from datetime import date, datetime
 
 
 def generate_executive_brief(
@@ -64,7 +64,7 @@ def generate_executive_brief(
     lines.append("---")
 
     # ── Weather ───────────────────────────────────────────────────────────────
-    lines.append("### 🌡️ Weather Outlook")
+    lines.append("### Weather Outlook")
     weather_note = "live forecast data" if doha_source == "live_forecast" else "seasonal climate averages"
     lines.append(f"*Source: {weather_note}*")
     lines.append("")
@@ -113,16 +113,16 @@ def generate_executive_brief(
     lines.append("---")
 
     # ── Logistics ─────────────────────────────────────────────────────────────
-    lines.append("### 🏛️ Logistics Status")
+    lines.append("### Logistics Status")
     lines.append("*Source: Mock event management API (demo)*")
     lines.append("")
 
     def _status(val: float, thresholds=(90, 80)) -> str:
         if val >= thresholds[0]:
-            return "✅ On track"
+            return "On track"
         if val >= thresholds[1]:
-            return "⚠️ Monitor"
-        return "🔴 Action required"
+            return "Monitor"
+        return "Action required"
 
     lines.append(f"- **Supplier Readiness:** {supplier:.0f}% — {_status(supplier)}")
     lines.append(f"- **VIP Arrival Confirmations:** {vip:.0f}% — {_status(vip)}")
@@ -131,8 +131,9 @@ def generate_executive_brief(
     lines.append("---")
 
     # ── Travel ────────────────────────────────────────────────────────────────
-    lines.append("### ✈️ Travel Intelligence")
-    lines.append("*Source: Mock flight intelligence API (demo)*")
+    lines.append("### Travel Intelligence")
+    flight_source_note = flight_data.get("source", "Estimated data")
+    lines.append(f"*Source: {flight_source_note}*")
     lines.append("")
 
     flight_comment = (
@@ -149,7 +150,7 @@ def generate_executive_brief(
     lines.append("---")
 
     # ── Recommendations ───────────────────────────────────────────────────────
-    lines.append("### 📋 Key Recommendations")
+    lines.append("### Key Recommendations")
     recommendations: list[str] = []
 
     if doha_temp > 38:
@@ -197,3 +198,60 @@ def generate_executive_brief(
     )
 
     return "\n\n".join(lines)
+
+
+def generate_overview_summary(
+    risk_result: dict,
+    weather_doha: dict,
+    flight_data: dict,
+    event_params: dict,
+) -> str:
+    """
+    Return a 3-sentence plain-language summary for the Overview tab.
+    Each sentence is traceable to one input value.
+    """
+    score    = risk_result["score"]
+    category = risk_result["category"]
+    doha_temp = weather_doha.get("temp_max", 30.0)
+    disruption = flight_data.get("disruption_risk_label", "Low")
+    days = (event_params["start_date"] - date.today()).days
+
+    # Sentence 1 — overall risk
+    top_factor = _top_risk_factor(risk_result)
+    if score < 25:
+        s1 = f"Overall risk is **{category}** ({score}/100) — no critical issues identified at this time."
+    elif score < 50:
+        s1 = f"Overall risk is **{category}** ({score}/100) — primary driver is **{top_factor}**, which warrants monitoring."
+    else:
+        s1 = f"Overall risk is **{category}** ({score}/100) — **{top_factor}** requires immediate attention."
+
+    # Sentence 2 — Doha climate
+    if doha_temp > 40:
+        s2 = f"Doha is forecast at **{doha_temp:.0f} C max** — extreme heat conditions; all outdoor activities must be moved indoors."
+    elif doha_temp > 35:
+        s2 = f"Doha temperatures are elevated (**{doha_temp:.0f} C max**) — outdoor programme elements should be minimised."
+    else:
+        s2 = f"Doha climate is manageable (**{doha_temp:.0f} C max**) with no major weather restrictions."
+
+    # Sentence 3 — countdown + travel
+    s3 = (
+        f"Event opens in **{days} day{'s' if days != 1 else ''}** — "
+        f"travel disruption risk is currently **{disruption.lower()}**."
+    )
+
+    return f"{s1} {s2} {s3}"
+
+
+def _top_risk_factor(risk_result: dict) -> str:
+    breakdown = risk_result.get("breakdown", {})
+    labels = {
+        "weather":  "weather",
+        "travel":   "travel disruption",
+        "supplier": "supplier readiness",
+        "vip":      "VIP arrivals",
+        "guest":    "guest confirmation",
+    }
+    if not breakdown:
+        return "unknown"
+    top_key = max(breakdown, key=lambda k: breakdown[k])
+    return labels.get(top_key, top_key)
