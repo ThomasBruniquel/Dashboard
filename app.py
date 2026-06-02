@@ -361,21 +361,24 @@ with tab_season:
         n_shown = len(filtered_df)
         st.caption(f"Showing {n_shown} of {n_races} events")
 
-    # ── Map — Scattermapbox fills container 100%, zoom never changes frame size ──
+    # ── Map — Scattergeo, static (no zoom/pan), always fills the frame cleanly ──
     fig_map = go.Figure()
 
     for status, color in [("Delivered", NAVY), ("Upcoming", GOLD)]:
         sub = filtered_df[filtered_df["Status"] == status]
         if sub.empty:
             continue
-        # Marker layer (filled circles)
-        fig_map.add_trace(go.Scattermapbox(
+        fig_map.add_trace(go.Scattergeo(
             lat=sub["lat"], lon=sub["lon"],
-            mode="markers",
-            marker=go.scattermapbox.Marker(size=26, color=color, opacity=0.90),
-            customdata=sub[["Event", "Country", "Venue", "Date", "Winner", "Team", "Round"]].values,
+            mode="markers+text",
+            marker=dict(size=18, color=color, opacity=0.90,
+                        line=dict(width=1.5, color="white")),
+            text=sub["Round"].astype(str),
+            textposition="middle center",
+            textfont=dict(color="white", size=8, family="Arial Black, sans-serif"),
+            customdata=sub[["Event", "Country", "Venue", "Date", "Winner", "Team"]].values,
             hovertemplate=(
-                "<b>Round %{customdata[6]} — %{customdata[0]}</b><br>"
+                "<b>Round %{text} — %{customdata[0]}</b><br>"
                 "%{customdata[2]}<br>"
                 "%{customdata[1]} · %{customdata[3]}<br>"
                 "Winner: %{customdata[4]} (%{customdata[5]})<br>"
@@ -383,38 +386,31 @@ with tab_season:
             ),
             name=status,
         ))
-        # Text layer — round number in white, centered on each marker
-        fig_map.add_trace(go.Scattermapbox(
-            lat=sub["lat"], lon=sub["lon"],
-            mode="text",
-            text=sub["Round"].astype(str),
-            textfont=dict(color="white", size=9, family="Arial Black, Arial, sans-serif"),
-            hoverinfo="skip",
-            showlegend=False,
-        ))
 
     fig_map.update_layout(
-        mapbox=dict(
-            style="carto-positron",   # free, no token needed
-            zoom=0.9,
-            center=dict(lat=25, lon=15),
-        ),
-        height=460,
+        height=440,
         margin=dict(l=0, r=0, t=8, b=0),
-        uirevision="f1_mapbox_2024",
+        dragmode=False,   # disable zoom & pan — frame is always the same size
         showlegend=True,
-        legend=dict(
-            orientation="h", y=1.02, x=0.5, xanchor="center",
-            font=dict(size=11, color=SLATE),
-            bgcolor="rgba(248,250,252,0.8)",
+        legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center",
+                    font=dict(size=11, color=SLATE)),
+        geo=dict(
+            projection_type="equirectangular",
+            showland=True,       landcolor="#EEF2F7",
+            showocean=True,      oceancolor="#EFF6FF",
+            showcoastlines=True, coastlinecolor="#CBD5E1",
+            showcountries=True,  countrycolor="#E2E8F0",
+            showframe=False,
+            bgcolor="#F8FAFC",
+            lataxis=dict(range=[-65, 80],   showgrid=False),
+            lonaxis=dict(range=[-175, 180], showgrid=False),
         ),
         paper_bgcolor="#F8FAFC",
     )
 
     st.plotly_chart(fig_map, use_container_width=True, config={
-        "scrollZoom":       True,
-        "displayModeBar":   True,
-        "modeBarButtonsToRemove": ["select2d", "lasso2d", "toggleSpikelines"],
+        "scrollZoom":     False,
+        "displayModeBar": False,   # hide toolbar entirely — no zoom controls shown
     })
 
     # ── Event calendar table ──────────────────────────────────────────────────
