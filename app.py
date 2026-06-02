@@ -315,54 +315,114 @@ with tab_season:
         w   = winner_map.get(rnd, {})
         delivered = rnd <= completed_events
         map_rows.append({
-            "Event":    race["raceName"],
-            "Country":  loc["country"],
-            "Venue":    race["Circuit"]["circuitName"],
-            "Date":     race["date"],
-            "lat":      float(loc.get("lat", 0)),
-            "lon":      float(loc.get("long", 0)),
-            "Result":   w.get("name", "Upcoming"),
-            "Entity":   w.get("team", ""),
-            "Status":   "Delivered" if delivered else "Upcoming",
+            "Round":   rnd,
+            "Event":   race["raceName"],
+            "Country": loc["country"],
+            "Venue":   race["Circuit"]["circuitName"],
+            "Date":    race["date"],
+            "lat":     float(loc.get("lat", 0)),
+            "lon":     float(loc.get("long", 0)),
+            "Winner":  w.get("name", "—"),
+            "Team":    w.get("team", "—"),
+            "Status":  "Delivered" if delivered else "Upcoming",
         })
     map_df = pd.DataFrame(map_rows)
 
-    fig_map = px.scatter_geo(
-        map_df,
-        lat="lat", lon="lon",
-        hover_name="Event",
-        hover_data={"Country": True, "Venue": True, "Date": True,
-                    "Result": True, "Status": True, "lat": False, "lon": False},
-        color="Status",
-        color_discrete_map={"Delivered": NAVY, "Upcoming": GOLD},
-        template="plotly_white",
-        title=f"Portfolio deployment — {n_races} events · {n_countries} countries · {completed_events} delivered",
-    )
-    fig_map.update_traces(
-        marker=dict(size=11, opacity=0.92, line=dict(width=1, color="white")),
-    )
+    # ── Selectors ─────────────────────────────────────────────────────────────
+    mc1, mc2, mc3 = st.columns([2, 2, 3])
+    with mc1:
+        status_filter = st.radio(
+            "Show", ["All events", "Delivered only", "Upcoming only"],
+            horizontal=True, label_visibility="collapsed",
+        )
+    with mc2:
+        region_options = {
+            "All regions": [],
+            "Europe":      ["UK", "Monaco", "Spain", "Belgium", "Netherlands",
+                            "Italy", "Hungary", "Austria", "Azerbaijan"],
+            "Americas":    ["USA", "Canada", "Mexico", "Brazil"],
+            "Middle East": ["Bahrain", "Saudi Arabia", "Qatar", "UAE"],
+            "Asia-Pacific": ["Japan", "China", "Australia", "Singapore"],
+        }
+        region_filter = st.selectbox(
+            "Region", list(region_options.keys()), label_visibility="collapsed"
+        )
+
+    # Apply filters
+    filtered_df = map_df.copy()
+    if status_filter == "Delivered only":
+        filtered_df = filtered_df[filtered_df["Status"] == "Delivered"]
+    elif status_filter == "Upcoming only":
+        filtered_df = filtered_df[filtered_df["Status"] == "Upcoming"]
+    if region_options[region_filter]:
+        filtered_df = filtered_df[filtered_df["Country"].isin(region_options[region_filter])]
+
+    with mc3:
+        n_shown = len(filtered_df)
+        st.caption(f"Showing {n_shown} of {n_races} events")
+
+    # ── Map — numbered markers, equirectangular, fixed frame ──────────────────
+    fig_map = go.Figure()
+
+    for status, color, sym in [("Delivered", NAVY, "circle"), ("Upcoming", GOLD, "circle")]:
+        sub = filtered_df[filtered_df["Status"] == status]
+        if sub.empty:
+            continue
+        fig_map.add_trace(go.Scattergeo(
+            lat=sub["lat"],
+            lon=sub["lon"],
+            mode="markers+text",
+            marker=dict(
+                size=22,
+                color=color,
+                opacity=0.92,
+                symbol=sym,
+                line=dict(width=1.5, color="white"),
+            ),
+            text=sub["Round"].astype(str),
+            textposition="middle center",
+            textfont=dict(color="white", size=9, family="Arial Black, Arial, sans-serif"),
+            customdata=sub[["Event", "Country", "Venue", "Date", "Winner", "Team"]].values,
+            hovertemplate=(
+                "<b>Round %{text} — %{customdata[0]}</b><br>"
+                "%{customdata[2]}, %{customdata[1]}<br>"
+                "Date: %{customdata[3]}<br>"
+                "Winner: %{customdata[4]} (%{customdata[5]})<br>"
+                "<extra></extra>"
+            ),
+            name=status,
+        ))
+
     fig_map.update_layout(
-        height=480,                       # larger map
-        margin=dict(l=0, r=0, t=44, b=0),
-        uirevision="f1_map_2024",         # preserves zoom/pan state — frame stays fixed on interaction
-        legend=dict(orientation="h", y=-0.01, x=0.5, xanchor="center",
-                    font=dict(size=12)),
-        title_font=dict(size=13, color=SLATE),
-        geo=dict(
-            showland=True,        landcolor="#EEF2F7",
-            showocean=True,       oceancolor="#F0F6FF",
-            showcoastlines=True,  coastlinecolor="#CBD5E1",
-            showframe=False,
-            showlakes=True,       lakecolor="#F0F6FF",
-            showcountries=True,   countrycolor="#E2E8F0",
-            projection_type="natural earth",
+        height=460,
+        margin=dict(l=0, r=0, t=8, b=0),
+        uirevision="f1_map_fixed",   # preserves zoom state across rerenders
+        showlegend=True,
+        legend=dict(
+            orientation="h", y=1.02, x=0.5, xanchor="center",
+            font=dict(size=11, color=SLATE),
+            bgcolor="rgba(255,255,255,0)",
         ),
+        geo=dict(
+            projection_type="equirectangular",   # rectangular — no oval, no size change on zoom
+            showland=True,        landcolor="#EEF2F7",
+            showocean=True,       oceancolor="#EFF6FF",
+            showcoastlines=True,  coastlinecolor="#CBD5E1",
+            showcountries=True,   countrycolor="#E2E8F0",
+            showframe=False,
+            # Fixed bounds — the frame never resizes, zoom only pans inside
+            lataxis=dict(range=[-60, 80], showgrid=False),
+            lonaxis=dict(range=[-170, 180], showgrid=False),
+            bgcolor="#F8FAFC",
+        ),
+        paper_bgcolor="#F8FAFC",
+        plot_bgcolor="#F8FAFC",
     )
+
     st.plotly_chart(fig_map, use_container_width=True, config={
-        "scrollZoom": True,           # enable scroll-to-zoom
-        "displayModeBar": True,
+        "scrollZoom":       True,
+        "displayModeBar":   True,
         "modeBarButtonsToRemove": ["select2d", "lasso2d", "toggleSpikelines"],
-        "toImageButtonOptions": {"format": "png", "filename": "f1_portfolio_map"},
     })
 
     # ── Event calendar table ──────────────────────────────────────────────────
