@@ -38,9 +38,11 @@ CALL_TIMEOUT = 30
 # ── Provider ───────────────────────────────────────────────────────────────────
 
 def _provider() -> str | None:
-    if os.getenv("OPENROUTER_API_KEY"): return "openrouter"
-    if os.getenv("GROQ_API_KEY"):       return "groq"
+    # Gemini first — most reliable for streaming on free tier
+    # OpenRouter free models hit shared rate-limits too aggressively
     if os.getenv("GEMINI_API_KEY"):     return "gemini"
+    if os.getenv("GROQ_API_KEY"):       return "groq"
+    if os.getenv("OPENROUTER_API_KEY"): return "openrouter"
     return None
 
 def is_available() -> bool:
@@ -276,30 +278,41 @@ def _stream_groq(messages: list) -> Generator[str, None, None]:
 
 
 def _stream_gemini(messages: list) -> Generator[str, None, None]:
-    """Gemini doesn't support true streaming via REST — yield full response."""
-    key = os.getenv("GEMINI_API_KEY")
-    # Convert messages to Gemini format
+    """Real streaming from Gemini via SSE (streamGenerateContent)."""
+    key         = os.getenv("GEMINI_API_KEY")
     system_text = next((m["content"] for m in messages if m["role"] == "system"), "")
     contents    = [
         {"role": "model" if m["role"] == "assistant" else "user",
          "parts": [{"text": m["content"]}]}
         for m in messages if m["role"] in ("user", "assistant") and m.get("content")
     ]
-    resp = _req.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={key}",
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+           f"{GEMINI_MODEL}:streamGenerateContent?alt=sse&key={key}")
+    with _req.post(
+        url,
         json={
             "system_instruction": {"parts": [{"text": system_text}]},
             "contents":           contents,
             "generationConfig":   {"maxOutputTokens": 400, "temperature": 0.1},
         },
+        stream=True,
         timeout=CALL_TIMEOUT,
-    )
-    resp.raise_for_status()
-    parts = resp.json()["candidates"][0]["content"].get("parts", [])
-    text  = "".join(p.get("text", "") for p in parts).strip()
-    # Simulate streaming by yielding words
-    for word in text.split(" "):
-        yield word + " "
+    ) as resp:
+        resp.raise_for_status()
+        for raw in resp.iter_lines():
+            if not raw:
+                continue
+            line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+            if not line.startswith("data: "):
+                continue
+            try:
+                chunk = json.loads(line[6:])
+                parts = chunk["candidates"][0]["content"].get("parts", [])
+                text  = "".join(p.get("text", "") for p in parts)
+                if text:
+                    yield text
+            except Exception:
+                continue
 
 
 # ── Public streaming entry point ───────────────────────────────────────────────
