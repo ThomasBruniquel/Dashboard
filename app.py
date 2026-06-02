@@ -361,62 +361,54 @@ with tab_season:
         n_shown = len(filtered_df)
         st.caption(f"Showing {n_shown} of {n_races} events")
 
-    # ── Map — numbered markers, equirectangular, fixed frame ──────────────────
+    # ── Map — Scattermapbox fills container 100%, zoom never changes frame size ──
     fig_map = go.Figure()
 
-    for status, color, sym in [("Delivered", NAVY, "circle"), ("Upcoming", GOLD, "circle")]:
+    for status, color in [("Delivered", NAVY), ("Upcoming", GOLD)]:
         sub = filtered_df[filtered_df["Status"] == status]
         if sub.empty:
             continue
-        fig_map.add_trace(go.Scattergeo(
-            lat=sub["lat"],
-            lon=sub["lon"],
-            mode="markers+text",
-            marker=dict(
-                size=22,
-                color=color,
-                opacity=0.92,
-                symbol=sym,
-                line=dict(width=1.5, color="white"),
-            ),
-            text=sub["Round"].astype(str),
-            textposition="middle center",
-            textfont=dict(color="white", size=9, family="Arial Black, Arial, sans-serif"),
-            customdata=sub[["Event", "Country", "Venue", "Date", "Winner", "Team"]].values,
+        # Marker layer (filled circles)
+        fig_map.add_trace(go.Scattermapbox(
+            lat=sub["lat"], lon=sub["lon"],
+            mode="markers",
+            marker=go.scattermapbox.Marker(size=26, color=color, opacity=0.90),
+            customdata=sub[["Event", "Country", "Venue", "Date", "Winner", "Team", "Round"]].values,
             hovertemplate=(
-                "<b>Round %{text} — %{customdata[0]}</b><br>"
-                "%{customdata[2]}, %{customdata[1]}<br>"
-                "Date: %{customdata[3]}<br>"
+                "<b>Round %{customdata[6]} — %{customdata[0]}</b><br>"
+                "%{customdata[2]}<br>"
+                "%{customdata[1]} · %{customdata[3]}<br>"
                 "Winner: %{customdata[4]} (%{customdata[5]})<br>"
                 "<extra></extra>"
             ),
             name=status,
         ))
+        # Text layer — round number in white, centered on each marker
+        fig_map.add_trace(go.Scattermapbox(
+            lat=sub["lat"], lon=sub["lon"],
+            mode="text",
+            text=sub["Round"].astype(str),
+            textfont=dict(color="white", size=9, family="Arial Black, Arial, sans-serif"),
+            hoverinfo="skip",
+            showlegend=False,
+        ))
 
     fig_map.update_layout(
+        mapbox=dict(
+            style="carto-positron",   # free, no token needed
+            zoom=0.9,
+            center=dict(lat=25, lon=15),
+        ),
         height=460,
         margin=dict(l=0, r=0, t=8, b=0),
-        uirevision="f1_map_fixed",   # preserves zoom state across rerenders
+        uirevision="f1_mapbox_2024",
         showlegend=True,
         legend=dict(
             orientation="h", y=1.02, x=0.5, xanchor="center",
             font=dict(size=11, color=SLATE),
-            bgcolor="rgba(255,255,255,0)",
-        ),
-        geo=dict(
-            projection_type="equirectangular",   # rectangular — no oval, no size change on zoom
-            showland=True,        landcolor="#EEF2F7",
-            showocean=True,       oceancolor="#EFF6FF",
-            showcoastlines=True,  coastlinecolor="#CBD5E1",
-            showcountries=True,   countrycolor="#E2E8F0",
-            showframe=False,
-            # Fixed bounds — the frame never resizes, zoom only pans inside
-            lataxis=dict(range=[-60, 80], showgrid=False),
-            lonaxis=dict(range=[-170, 180], showgrid=False),
-            bgcolor="#F8FAFC",
+            bgcolor="rgba(248,250,252,0.8)",
         ),
         paper_bgcolor="#F8FAFC",
-        plot_bgcolor="#F8FAFC",
     )
 
     st.plotly_chart(fig_map, use_container_width=True, config={
