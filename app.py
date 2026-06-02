@@ -145,10 +145,11 @@ with st.sidebar:
                     f"Season: {n_races} races in {n_countries} countries."
                 )
                 augmented = user_input + f"\n\nContext: {f1_ctx}"
-                response, calls = llm_agent.ask(augmented, st.session_state.messages[:-1])
-                calls.insert(0, "Jolpica F1 API — 2024 standings injected into context")
+                with st.spinner(f"Agent thinking… ({llm_agent.model_label()}, max {llm_agent.CALL_TIMEOUT}s)"):
+                    response, calls = llm_agent.ask(augmented, st.session_state.messages[:-1])
+                calls.insert(0, "Jolpica F1 API — season context injected")
             except Exception as e:
-                response, calls = f"Erreur LLM : {e}", []
+                response, calls = f"Erreur : {str(e)[:200]}", []
         else:
             response = "Ajoutez `GEMINI_API_KEY` dans `.env` pour activer l'agent."
             calls    = []

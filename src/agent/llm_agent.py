@@ -20,16 +20,17 @@ import requests as _req
 import streamlit as st
 from openai import OpenAI
 
-# ── Models ─────────────────────────────────────────────────────────────────────
-# Free models tried in order — automatic fallback on 429 rate-limit
+# ── Models — fastest first, auto-fallback on 429 ──────────────────────────────
 OPENROUTER_MODELS = [
-    "qwen/qwen3-next-80b-a3b-instruct:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "google/gemma-4-31b-it:free",
+    "meta-llama/llama-3.3-70b-instruct:free",       # fast, reliable function calling
+    "google/gemma-4-31b-it:free",                    # good fallback
+    "qwen/qwen3-next-80b-a3b-instruct:free",         # large, can be slow on free tier
 ]
-OPENROUTER_MODEL = OPENROUTER_MODELS[0]   # displayed in UI
+OPENROUTER_MODEL = OPENROUTER_MODELS[0]   # shown in UI
 GROQ_MODEL       = "llama-3.3-70b-versatile"
 GEMINI_MODEL     = "gemini-2.5-flash-lite"
+
+CALL_TIMEOUT = 25   # seconds per LLM call — avoids infinite hangs on slow models
 
 SYSTEM = (
     "You are an F1 racing intelligence assistant with access to real-time data tools.\n"
@@ -257,12 +258,13 @@ def model_label() -> str:
     return "none"
 
 
-@st.cache_resource(show_spinner=False)
 def _openai_client(provider: str) -> OpenAI:
+    """Create a fresh client each time — avoids caching a client with a missing key."""
     if provider == "openrouter":
         return OpenAI(
             api_key=os.getenv("OPENROUTER_API_KEY"),
             base_url="https://openrouter.ai/api/v1",
+            timeout=CALL_TIMEOUT,
             default_headers={
                 "HTTP-Referer": "https://f1-event-intelligence.streamlit.app",
                 "X-Title":      "F1 Event Intelligence",
@@ -272,6 +274,7 @@ def _openai_client(provider: str) -> OpenAI:
         return OpenAI(
             api_key=os.getenv("GROQ_API_KEY"),
             base_url="https://api.groq.com/openai/v1",
+            timeout=CALL_TIMEOUT,
         )
     raise ValueError(f"Unknown provider: {provider}")
 
@@ -299,14 +302,14 @@ def _function_calling_loop(question: str, history: list[dict], provider: str) ->
         msgs  = list(messages)   # fresh copy per model attempt
 
         try:
-            for _ in range(6):   # max 6 tool-call rounds per model
+            for _ in range(5):   # max 5 tool-call rounds per model
                 resp   = client.chat.completions.create(
                     model=model,
                     messages=msgs,
                     tools=TOOLS,
                     tool_choice="auto",
                     temperature=0.1,
-                    max_tokens=600,
+                    max_tokens=400,  # keep responses concise and fast
                 )
                 choice = resp.choices[0]
                 msg    = choice.message
@@ -329,12 +332,14 @@ def _function_calling_loop(question: str, history: list[dict], provider: str) ->
             return "Trop d'appels d'outils — réessayez.", tools_called
 
         except RateLimitError:
-            # Try next model in the list
-            continue
+            continue   # try next model
         except Exception as e:
-            return f"Erreur : {e}", tools_called
+            err = str(e)
+            if "timeout" in err.lower() or "timed out" in err.lower():
+                continue   # timeout → try next model
+            return f"Erreur : {err[:120]}", tools_called
 
-    return "Tous les modèles sont rate-limités — réessayez dans 30 secondes.", tools_called
+    return "Modèles indisponibles ou trop lents — réessayez dans 30 s.", tools_called
 
 
 def _gemini_rag(question: str, history: list[dict]) -> tuple[str, list[str]]:
