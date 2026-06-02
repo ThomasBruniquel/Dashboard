@@ -57,6 +57,52 @@ def get_all_results(year: int = 2024) -> list[dict]:
     return resp.json()["MRData"]["RaceTable"]["Races"]
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_driver_season_results(driver_id: str, year: int = 2024) -> list[dict]:
+    """All race results for one driver in a season — points, position, status."""
+    resp = requests.get(
+        f"{BASE}/{year}/drivers/{driver_id}/results/",
+        params={"format": "json", "limit": 50}, timeout=15,
+    )
+    if resp.status_code != 200:
+        return []
+    out = []
+    for race in resp.json()["MRData"]["RaceTable"]["Races"]:
+        for r in race.get("Results", []):
+            out.append({
+                "round":    int(race["round"]),
+                "race":     race["raceName"],
+                "position": int(r.get("position", 99)),
+                "points":   float(r.get("points", 0)),
+                "status":   r.get("status", ""),
+                "grid":     int(r.get("grid", 0)),
+                "laps":     int(r.get("laps", 0)),
+                "time":     r.get("Time", {}).get("time", ""),
+            })
+    return out
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_driver_wiki(wiki_url: str) -> dict:
+    """Fetch driver photo (thumbnail) and bio extract from Wikipedia REST API."""
+    if "/wiki/" not in wiki_url:
+        return {}
+    title = wiki_url.split("/wiki/")[-1]
+    headers = {"User-Agent": "F1EventDashboard/1.0 (portfolio; python-requests)"}
+    resp = requests.get(
+        f"https://en.wikipedia.org/api/rest_v1/page/summary/{title}",
+        headers=headers, timeout=10,
+    )
+    if resp.status_code != 200:
+        return {}
+    data = resp.json()
+    return {
+        "thumbnail": data.get("thumbnail", {}).get("source", ""),
+        "extract":   data.get("extract", "")[:700],
+        "wiki_url":  data.get("content_urls", {}).get("desktop", {}).get("page", wiki_url),
+    }
+
+
 # ── Helper: team colours (UI styling only — not event data) ───────────────────
 TEAM_COLORS: dict[str, str] = {
     "McLaren":      "#FF8000",

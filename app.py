@@ -19,7 +19,9 @@ import plotly.express as px
 
 from src.api.f1_data import (
     get_races, get_driver_standings, get_constructor_standings,
-    get_race_results, get_all_results, TEAM_COLORS, DEFAULT_COLOR,
+    get_race_results, get_all_results,
+    get_driver_season_results, get_driver_wiki,
+    TEAM_COLORS, DEFAULT_COLOR,
 )
 from src.api.currency import fetch_currency_rates
 from src.api.fx_history import fetch_fx_history, fx_risk_label
@@ -267,8 +269,8 @@ st.caption(
 )
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_season, tab_results, tab_standings, tab_finance = st.tabs([
-    "Portfolio Overview", "Event Detail", "Performance Rankings", "Budget Exposure"
+tab_season, tab_results, tab_standings, tab_finance, tab_participants = st.tabs([
+    "Portfolio Overview", "Event Detail", "Performance Rankings", "Budget Exposure", "Participants"
 ])
 
 
@@ -743,6 +745,184 @@ with tab_finance:
         )
         st.plotly_chart(fig_fx, use_container_width=True)
 
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — PARTICIPANTS
+# ══════════════════════════════════════════════════════════════════════════════
+from datetime import date as _date
+
+with tab_participants:
+    st.markdown(f'<p class="section-label">Participant Intelligence</p>', unsafe_allow_html=True)
+    st.caption(
+        "Individual participant profiles — biographical data from Wikipedia, "
+        "performance data from Jolpica API. "
+        "In a live event context, the same architecture serves speaker, VIP, or delegate intelligence."
+    )
+
+    # ── Build selector from live standings ────────────────────────────────────
+    selector_map = {}
+    for s in driver_st:
+        d   = s["Driver"]
+        key = f"#{s['position']}  {d['code']} — {d['givenName']} {d['familyName']}  ·  {s['Constructors'][0]['name']}  ·  {s['points']} pts"
+        selector_map[key] = {
+            "id":          d["driverId"],
+            "code":        d["code"],
+            "given":       d["givenName"],
+            "family":      d["familyName"],
+            "dob":         d.get("dateOfBirth", ""),
+            "nationality": d.get("nationality", ""),
+            "wiki_url":    d.get("url", ""),
+            "number":      d.get("permanentNumber", ""),
+            "team":        s["Constructors"][0]["name"],
+            "position":    int(s["position"]),
+            "points":      float(s["points"]),
+            "wins":        int(s["wins"]),
+        }
+
+    selected_key = st.selectbox(
+        "Select participant",
+        list(selector_map.keys()),
+        label_visibility="collapsed",
+    )
+    drv = selector_map[selected_key]
+
+    # ── Fetch live data ───────────────────────────────────────────────────────
+    with st.spinner("Loading profile…"):
+        wiki  = get_driver_wiki(drv["wiki_url"])
+        results = get_driver_season_results(drv["id"], 2024)
+
+    # Derived stats
+    age = (_date.today() - _date.fromisoformat(drv["dob"])).days // 365 if drv["dob"] else "—"
+
+    def _is_dnf(status: str) -> bool:
+        return bool(status) and status != "Finished" and not status.endswith("Lap") and not status.endswith("Laps")
+
+    podiums    = sum(1 for r in results if r["position"] <= 3)
+    dnfs       = sum(1 for r in results if _is_dnf(r["status"]))
+    races_done = len(results)
+    avg_finish = sum(r["position"] for r in results if r["position"] < 99) / max(races_done - dnfs, 1)
+
+    team_color = TEAM_COLORS.get(drv["team"], NAVY)
+
+    st.divider()
+
+    # ── Profile header ─────────────────────────────────────────────────────────
+    col_photo, col_bio = st.columns([1, 3], gap="large")
+
+    with col_photo:
+        if wiki.get("thumbnail"):
+            st.image(wiki["thumbnail"], width=200, caption="Source: Wikipedia")
+        else:
+            st.markdown(
+                f"<div style='width:200px;height:240px;background:{team_color}22;"
+                f"border-radius:12px;display:flex;align-items:center;"
+                f"justify-content:center;font-size:3rem;color:{team_color};font-weight:900'>"
+                f"{drv['code']}</div>",
+                unsafe_allow_html=True,
+            )
+
+    with col_bio:
+        # Championship badge
+        st.markdown(
+            f"<div style='display:inline-block;background:{team_color};color:white;"
+            f"padding:4px 14px;border-radius:20px;font-weight:700;font-size:0.8rem;"
+            f"letter-spacing:0.05em;margin-bottom:8px'>"
+            f"#{drv['position']} CHAMPIONSHIP · {drv['team'].upper()}</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(f"## {drv['given']} {drv['family']}")
+        st.markdown(
+            f"<p style='color:{SLATE};font-size:1rem;margin-top:-8px'>"
+            f"{drv['nationality']}  ·  {age} years old  ·  Car #{drv['number']}</p>",
+            unsafe_allow_html=True,
+        )
+        if drv["dob"]:
+            st.caption(f"Date of birth: {drv['dob']}")
+
+        # Wikipedia link
+        if wiki.get("wiki_url"):
+            st.markdown(f"[Full profile on Wikipedia ↗]({wiki['wiki_url']})")
+
+    st.divider()
+
+    # ── KPI row ───────────────────────────────────────────────────────────────
+    st.markdown(f'<p class="section-label">2024 Season Performance</p>', unsafe_allow_html=True)
+
+    kc1, kc2, kc3, kc4, kc5, kc6 = st.columns(6)
+    with kc1: st.metric("Championship Pts", f"{drv['points']:.0f}")
+    with kc2: st.metric("Wins",             drv["wins"])
+    with kc3: st.metric("Podiums",          podiums)
+    with kc4: st.metric("Races",            races_done)
+    with kc5: st.metric("DNFs",             dnfs,
+                         delta_color="inverse" if dnfs > 2 else "off")
+    with kc6: st.metric("Avg Finish Pos.",  f"{avg_finish:.1f}")
+
+    # ── Season performance chart ──────────────────────────────────────────────
+    if results:
+        res_df = pd.DataFrame(results)
+        res_df["cumulative"] = res_df["points"].cumsum()
+
+        fig_perf = go.Figure()
+
+        # Bar: points per race
+        bar_colors = [
+            team_color if r["position"] <= 3 else f"{team_color}88"
+            for r in results
+        ]
+        fig_perf.add_trace(go.Bar(
+            x=res_df["round"], y=res_df["points"],
+            name="Points per race",
+            marker_color=bar_colors,
+            hovertemplate="Round %{x} — %{customdata}<br>%{y} pts<extra></extra>",
+            customdata=res_df["race"],
+        ))
+
+        # Line: cumulative
+        fig_perf.add_trace(go.Scatter(
+            x=res_df["round"], y=res_df["cumulative"],
+            name="Cumulative points",
+            line=dict(color=NAVY, width=2.5),
+            yaxis="y2",
+            mode="lines+markers",
+            marker=dict(size=5),
+            hovertemplate="Round %{x}<br>Total: %{y} pts<extra></extra>",
+        ))
+
+        fig_perf.update_layout(
+            template="plotly_white",
+            height=280,
+            margin=dict(l=0, r=0, t=10, b=0),
+            xaxis=dict(title="Round", dtick=2),
+            yaxis=dict(title="Points scored", showgrid=True, gridcolor="#F1F5F9"),
+            yaxis2=dict(title="Cumulative pts", overlaying="y", side="right",
+                        showgrid=False),
+            legend=dict(orientation="h", y=1.06),
+            bargap=0.25,
+        )
+        st.plotly_chart(fig_perf, use_container_width=True)
+
+        # Race detail table (compact)
+        with st.expander("Race-by-race results", expanded=False):
+            table_df = pd.DataFrame([{
+                "Round":    r["round"],
+                "Event":    r["race"],
+                "Grid":     r["grid"],
+                "Finish":   r["position"] if r["position"] < 99 else "—",
+                "Points":   int(r["points"]),
+                "Status":   r["status"],
+            } for r in results])
+            st.dataframe(table_df, hide_index=True, use_container_width=True, height=300)
+
+    st.divider()
+
+    # ── Biography ─────────────────────────────────────────────────────────────
+    st.markdown(f'<p class="section-label">Biography</p>', unsafe_allow_html=True)
+    if wiki.get("extract"):
+        st.markdown(wiki["extract"])
+        st.caption("Source: Wikipedia REST API (live)")
+    else:
+        st.info("Biography not available from Wikipedia for this participant.")
 
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
