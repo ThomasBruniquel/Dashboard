@@ -101,37 +101,117 @@ for race in winners:
             "time":   r.get("Time", {}).get("time", "—"),
         }
 
+import random
+
+THINKING_PHRASES = [
+    "Bien sûr ! Je regarde les données...",
+    "Je consulte les stats F1 en temps réel...",
+    "Un instant, je vérifie ça pour vous...",
+    "Je regarde ça tout de suite...",
+    "Bonne question ! Je cherche...",
+]
+
 # ── Session state ──────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
     st.session_state.messages = []
 using_llm = llm_agent.is_available()
 
-# ── Sidebar — minimal ─────────────────────────────────────────────────────────
+# ── Sidebar — chat ─────────────────────────────────────────────────────────────
 with st.sidebar:
-    model_str = llm_agent.model_label() if using_llm else "No LLM key"
-    st.markdown(f"{'🟢' if using_llm else '⚪'} **{model_str}**")
+    model_str = llm_agent.model_label() if using_llm else "Aucune clé LLM"
+    st.markdown(f"**Assistant F1** &nbsp; {'🟢' if using_llm else '⚪'}")
+    st.caption(model_str)
     st.divider()
-    st.caption("🟢 Jolpica · 🟢 Wikipedia · 🟢 open.er-api.com · 🟢 Frankfurter/ECB")
-    if st.button("Refresh data", use_container_width=True):
-        st.cache_data.clear(); st.rerun()
 
+    # Chat history + streaming — all inside the scrollable container
+    with st.container(height=460, border=False):
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+                if msg.get("calls"):
+                    with st.expander("Sources", expanded=False):
+                        for c in msg["calls"]:
+                            st.markdown(
+                                f'<div class="api-box">{c}</div>',
+                                unsafe_allow_html=True,
+                            )
+
+        # Process pending question — runs INSIDE the container so it appears inline
+        if "pending_question" in st.session_state:
+            q = st.session_state.pop("pending_question")
+
+            with st.chat_message("user"):
+                st.markdown(q)
+
+            with st.chat_message("assistant"):
+                # 1. Instant thinking message — masks fetch latency
+                thinking = st.empty()
+                thinking.markdown(random.choice(THINKING_PHRASES))
+
+                if using_llm:
+                    try:
+                        gen, sources = llm_agent.ask_streaming(
+                            q, st.session_state.messages
+                        )
+                        # 2. Clear thinking, stream real response word by word
+                        thinking.empty()
+                        full_response = ""
+                        area = st.empty()
+                        for chunk in gen:
+                            full_response += chunk
+                            area.markdown(full_response + "▌")
+                        area.markdown(full_response)
+                    except Exception as e:
+                        thinking.empty()
+                        full_response = f"Erreur : {e}"
+                        sources       = []
+                        st.markdown(full_response)
+                else:
+                    thinking.empty()
+                    full_response = "Ajoutez `GEMINI_API_KEY` dans `.env`."
+                    sources       = []
+                    st.markdown(full_response)
+
+            st.session_state.messages.append(
+                {"role": "user",      "content": q,             "calls": []}
+            )
+            st.session_state.messages.append(
+                {"role": "assistant", "content": full_response, "calls": sources or []}
+            )
+
+    # Input form — clear_on_submit clears the field after sending
+    with st.form("cf", clear_on_submit=True):
+        inp  = st.text_input(
+            "q", placeholder="Qui a gagné Monaco ? Classement ?",
+            label_visibility="collapsed",
+        )
+        send = st.form_submit_button("Envoyer →", use_container_width=True)
+
+    if send and inp.strip():
+        st.session_state["pending_question"] = inp.strip()
+        st.rerun()
+
+    if st.session_state.messages:
         if st.button("Effacer", use_container_width=True):
-            st.session_state.messages = st.session_state.messages[:1]
+            st.session_state.messages = []
             st.rerun()
 
     st.divider()
-    st.caption("🟢 Jolpica · 🟢 Wikipedia · 🟢 open.er-api.com · 🟢 Frankfurter/ECB")
+    st.caption("🟢 Jolpica · 🟢 Gemini · 🟢 open.er-api.com")
+    if st.button("Refresh data", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 st.title("F1 2024 Season — Event Intelligence Dashboard")
 st.caption(
     "All data from public APIs — no hardcoded values.  |  "
-    "Jolpica (race data) · Wikipedia · open.er-api.com · Frankfurter/ECB"
+    "Jolpica · Wikipedia · open.er-api.com · Frankfurter/ECB"
 )
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_season, tab_results, tab_standings, tab_finance, tab_chat = st.tabs([
-    "Season Overview", "Race Results", "Championship", "Finance & FX", "💬 Chat"
+tab_season, tab_results, tab_standings, tab_finance = st.tabs([
+    "Season Overview", "Race Results", "Championship", "Finance & FX"
 ])
 
 
@@ -423,63 +503,6 @@ with tab_finance:
         st.plotly_chart(fig_fx, use_container_width=True)
         st.caption("Source: Frankfurter / ECB (30 days)")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — CHAT (streaming, st.chat_input, st.write_stream)
-# ══════════════════════════════════════════════════════════════════════════════
-with tab_chat:
-    model_info = llm_agent.model_label() if using_llm else "No LLM configured"
-    st.caption(
-        f"{'🟢' if using_llm else '⚪'} **{model_info}** · "
-        "Data fetched live from Jolpica, Wikipedia & open.er-api.com before each answer. "
-        "Responses stream word by word."
-    )
-
-    # Render conversation history
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            if msg.get("calls"):
-                with st.expander("Sources", expanded=False):
-                    for c in msg["calls"]:
-                        st.markdown(f'<div class="api-box">{c}</div>', unsafe_allow_html=True)
-
-    # Chat input — native Streamlit, Enter to submit
-    if prompt := st.chat_input("Ask about F1 2024 — qui a gagné Monaco ? classement ? taux CHF ?"):
-        # Show user message immediately
-        st.session_state.messages.append({"role": "user", "content": prompt, "calls": []})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        # Fetch context & stream response
-        with st.chat_message("assistant"):
-            if using_llm:
-                try:
-                    with st.spinner("Fetching live F1 data…"):
-                        gen, sources = llm_agent.ask_streaming(
-                            prompt, st.session_state.messages[:-1]
-                        )
-                    full_response = st.write_stream(gen)
-                    if sources:
-                        with st.expander("Sources", expanded=False):
-                            for s in sources:
-                                st.markdown(f'<div class="api-box">{s}</div>', unsafe_allow_html=True)
-                except Exception as e:
-                    full_response = f"Erreur : {e}"
-                    sources       = []
-                    st.markdown(full_response)
-            else:
-                full_response = "Ajoutez `OPENROUTER_API_KEY` ou `GEMINI_API_KEY` dans `.env`."
-                sources       = []
-                st.markdown(full_response)
-
-        st.session_state.messages.append({
-            "role": "assistant", "content": full_response, "calls": sources
-        })
-
-    if st.session_state.messages:
-        if st.button("Effacer la conversation", type="secondary"):
-            st.session_state.messages = []
-            st.rerun()
 
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
