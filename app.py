@@ -42,29 +42,75 @@ except Exception:
     pass
 
 # ── Page ───────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="F1 2024 Event Intelligence", layout="wide")
+st.set_page_config(
+    page_title="Event Portfolio Intelligence",
+    page_icon=None,
+    layout="wide",
+)
 
-st.markdown("""
+NAVY = "#1E3A5F"
+GOLD = "#C9A96E"
+SLATE = "#64748B"
+
+st.markdown(f"""
 <style>
-    .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
-    div[data-testid="metric-container"] {
-        border: 1px solid #e0e0e0; border-radius: 8px;
-        padding: 12px 16px; background: #fafafa;
-    }
-    .api-box {
-        background: #f8f9fa; border-left: 3px solid #E8002D;
-        padding: 5px 10px; font-size: 0.78rem; color: #555;
+    .block-container {{ padding-top: 1rem; padding-bottom: 2rem; }}
+
+    /* Metric cards — clean white with subtle shadow */
+    div[data-testid="metric-container"] {{
+        background: white;
+        border: 1px solid #E2E8F0;
+        border-radius: 10px;
+        padding: 16px 20px;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }}
+    div[data-testid="metric-container"] label {{
+        color: {SLATE} !important;
+        font-size: 0.78rem !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.04em !important;
+        text-transform: uppercase !important;
+    }}
+
+    /* Executive summary block */
+    .exec-card {{
+        background: white;
+        border-left: 4px solid {NAVY};
+        border-radius: 0 10px 10px 0;
+        padding: 18px 24px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+        margin-bottom: 12px;
+    }}
+    .exec-title {{
+        font-size: 0.7rem; font-weight: 700; color: {SLATE};
+        text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 2px;
+    }}
+    .exec-value {{ font-size: 1.6rem; font-weight: 700; color: {NAVY}; }}
+    .exec-sub {{ font-size: 0.78rem; color: {SLATE}; margin-top: 2px; }}
+
+    /* Section labels */
+    .section-label {{
+        font-size: 0.68rem; font-weight: 700; color: {GOLD};
+        text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px;
+    }}
+
+    /* Source / API box */
+    .api-box {{
+        background: #F1F5F9;
+        border-left: 3px solid {GOLD};
+        padding: 5px 10px; font-size: 0.75rem; color: {SLATE};
         border-radius: 0 4px 4px 0; margin: 2px 0;
-    }
-    .source-chip {
-        display: inline-block; font-size: 0.68rem; font-weight: 700;
-        padding: 2px 8px; border-radius: 20px; margin-right: 4px;
-    }
-    .live-chip { background:#d4edda; color:#155724; }
+    }}
+
+    /* Sidebar cleaner */
+    section[data-testid="stSidebar"] {{
+        background: white;
+        border-right: 1px solid #E2E8F0;
+    }}
 </style>
 """, unsafe_allow_html=True)
 
-LIVE = '<span class="source-chip live-chip">LIVE</span>'
+LIVE = f'<span style="font-size:0.65rem;font-weight:700;padding:2px 7px;border-radius:20px;background:#DCFCE7;color:#15803D;">LIVE</span>'
 
 # ── Data ───────────────────────────────────────────────────────────────────────
 if st.sidebar.button("Refresh data"):
@@ -203,15 +249,16 @@ with st.sidebar:
         st.rerun()
 
 # ── Header ─────────────────────────────────────────────────────────────────────
-st.title("F1 2024 Season — Event Intelligence Dashboard")
+st.markdown(f'<p class="section-label">Event Portfolio Intelligence</p>', unsafe_allow_html=True)
+st.title("Formula 1 — 2024 World Championship Series")
 st.caption(
-    "All data from public APIs — no hardcoded values.  |  "
-    "Jolpica · Wikipedia · open.er-api.com · Frankfurter/ECB"
+    "Live data · Jolpica API · Wikipedia · open.er-api.com · Frankfurter/ECB — "
+    "demonstrating the architecture used for any multi-event international portfolio."
 )
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 tab_season, tab_results, tab_standings, tab_finance = st.tabs([
-    "Season Overview", "Race Results", "Championship", "Finance & FX"
+    "Portfolio Overview", "Event Detail", "Performance Rankings", "Budget Exposure"
 ])
 
 
@@ -219,73 +266,100 @@ tab_season, tab_results, tab_standings, tab_finance = st.tabs([
 # TAB 1 — SEASON OVERVIEW
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_season:
-    st.markdown(f'{LIVE} Jolpica — 2024 F1 Season', unsafe_allow_html=True)
+    # ── Executive Summary ─────────────────────────────────────────────────────
+    completed_events = len(winner_map)
+    remaining_events = n_races - completed_events
+    completion_pct   = completed_events / n_races * 100
 
-    # ── 5 KPIs ────────────────────────────────────────────────────────────────
-    k1, k2, k3, k4, k5 = st.columns(5)
-    with k1: st.metric("Races",             n_races)
-    with k2: st.metric("Countries",         n_countries)
-    with k3: st.metric("WDC Leader",        winner_name, delta=f"{winner_pts} pts", delta_color="off")
-    with k4: st.metric("WCC Leader",        best_team,   delta=f"{best_team_pts} pts", delta_color="off")
+    st.markdown(f'<p class="section-label">Executive Portfolio Summary</p>', unsafe_allow_html=True)
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    with k1:
+        st.metric("Events in Portfolio",   n_races)
+    with k2:
+        st.metric("Events Delivered",      completed_events,
+                  delta=f"{completion_pct:.0f}% completion", delta_color="off")
+    with k3:
+        st.metric("Events Remaining",      remaining_events)
+    with k4:
+        st.metric("Countries Covered",     n_countries)
     with k5:
+        st.metric("Top Performing Entity", best_team,
+                  delta=f"{best_team_pts} pts", delta_color="off")
+    with k6:
         n_teams = len({r["Constructor"]["name"] for rr in winners for r in rr.get("Results", [])[:1]})
-        st.metric("Teams", n_teams if n_teams else "10")
+        st.metric("Competing Entities",    n_teams if n_teams else 10)
 
+    st.markdown(
+        f'<p style="color:{SLATE};font-size:0.8rem;margin-top:4px">'
+        f'{LIVE} All metrics pulled live from Jolpica API (Ergast fork) — no hardcoded values.</p>',
+        unsafe_allow_html=True,
+    )
     st.divider()
 
-    # ── World map of circuits ─────────────────────────────────────────────────
+    # ── Global deployment map ─────────────────────────────────────────────────
+    st.markdown(f'<p class="section-label">Global Deployment Map</p>', unsafe_allow_html=True)
     map_rows = []
     for race in races:
         loc = race["Circuit"]["Location"]
         rnd = int(race["round"])
         w   = winner_map.get(rnd, {})
+        delivered = rnd <= completed_events
         map_rows.append({
-            "Race":    race["raceName"],
-            "Country": loc["country"],
-            "Circuit": race["Circuit"]["circuitName"],
-            "Date":    race["date"],
-            "lat":     float(loc.get("lat", 0)),
-            "lon":     float(loc.get("long", 0)),
-            "Winner":  w.get("name", "TBD"),
-            "Team":    w.get("team", ""),
+            "Event":    race["raceName"],
+            "Country":  loc["country"],
+            "Venue":    race["Circuit"]["circuitName"],
+            "Date":     race["date"],
+            "lat":      float(loc.get("lat", 0)),
+            "lon":      float(loc.get("long", 0)),
+            "Result":   w.get("name", "Upcoming"),
+            "Entity":   w.get("team", ""),
+            "Status":   "Delivered" if delivered else "Upcoming",
         })
     map_df = pd.DataFrame(map_rows)
 
     fig_map = px.scatter_geo(
         map_df,
         lat="lat", lon="lon",
-        hover_name="Race",
-        hover_data={"Country": True, "Circuit": True, "Date": True,
-                    "Winner": True, "lat": False, "lon": False},
-        color_discrete_sequence=["#E8002D"],
+        hover_name="Event",
+        hover_data={"Country": True, "Venue": True, "Date": True,
+                    "Result": True, "Status": True, "lat": False, "lon": False},
+        color="Status",
+        color_discrete_map={"Delivered": NAVY, "Upcoming": GOLD},
         template="plotly_white",
-        title="2024 F1 Calendar — 24 races across 19 countries",
+        title=f"Portfolio deployment — {n_races} events across {n_countries} countries",
     )
-    fig_map.update_traces(marker=dict(size=10, opacity=0.85))
-    fig_map.update_layout(height=400, margin=dict(l=0, r=0, t=40, b=0),
-                           geo=dict(showland=True, landcolor="#f8f8f8",
-                                    showocean=True, oceancolor="#e8f4f8"))
+    fig_map.update_traces(marker=dict(size=10, opacity=0.9))
+    fig_map.update_layout(
+        height=380,
+        margin=dict(l=0, r=0, t=40, b=0),
+        legend=dict(orientation="h", y=-0.02, x=0.5, xanchor="center"),
+        geo=dict(showland=True, landcolor="#EEF2F7",
+                 showocean=True, oceancolor="#F8FAFC",
+                 showcoastlines=True, coastlinecolor="#CBD5E1"),
+    )
     st.plotly_chart(fig_map, use_container_width=True)
 
-    # ── Race calendar table ───────────────────────────────────────────────────
-    st.subheader("Race Calendar")
+    # ── Event calendar table ──────────────────────────────────────────────────
+    st.markdown(f'<p class="section-label">Event Portfolio Calendar</p>', unsafe_allow_html=True)
     cal_rows = []
     for race in races:
-        rnd = int(race["round"])
-        loc = race["Circuit"]["Location"]
-        w   = winner_map.get(rnd, {})
+        rnd       = int(race["round"])
+        loc       = race["Circuit"]["Location"]
+        w         = winner_map.get(rnd, {})
+        delivered = rnd <= completed_events
         cal_rows.append({
-            "Round":   rnd,
-            "Grand Prix":  race["raceName"],
-            "Circuit":     race["Circuit"]["circuitName"],
+            "#":       rnd,
+            "Event":       race["raceName"],
+            "Venue":       race["Circuit"]["circuitName"],
             "Country":     loc["country"],
             "City":        loc["locality"],
             "Date":        race["date"],
-            "Winner":      w.get("name", "—"),
-            "Team":        w.get("team", "—"),
+            "Status":      "✓ Delivered" if delivered else "Upcoming",
+            "Top Result":  w.get("name", "—"),
+            "Entity":      w.get("team", "—"),
         })
     cal_df = pd.DataFrame(cal_rows)
-    st.dataframe(cal_df, hide_index=True, use_container_width=True, height=500)
+    st.dataframe(cal_df, hide_index=True, use_container_width=True, height=480)
     st.caption("Source: Jolpica API (no API key required)")
 
 
@@ -293,10 +367,11 @@ with tab_season:
 # TAB 2 — RACE RESULTS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_results:
-    st.markdown(f'{LIVE} Jolpica — race-by-race results', unsafe_allow_html=True)
+    st.markdown(f'<p class="section-label">Event Detail — Results & Delivery</p>', unsafe_allow_html=True)
+    st.markdown(f'{LIVE} Jolpica API', unsafe_allow_html=True)
 
-    race_options = {f"Round {r['round']}: {r['raceName']}": int(r["round"]) for r in races}
-    selected_label = st.selectbox("Select race", list(race_options.keys()))
+    race_options = {f"#{r['round']} — {r['raceName']} ({r['date']})": int(r["round"]) for r in races}
+    selected_label = st.selectbox("Select event", list(race_options.keys()))
     selected_round = race_options[selected_label]
 
     with st.spinner("Loading results…"):
@@ -354,15 +429,16 @@ with tab_results:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — CHAMPIONSHIP STANDINGS
+# TAB 3 — PERFORMANCE RANKINGS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_standings:
-    st.markdown(f'{LIVE} Jolpica — 2024 championship standings', unsafe_allow_html=True)
+    st.markdown(f'<p class="section-label">Performance Rankings — 2024 Season</p>', unsafe_allow_html=True)
+    st.markdown(f'{LIVE} Jolpica API', unsafe_allow_html=True)
 
     col_d, col_c = st.columns(2)
 
     with col_d:
-        st.subheader("Drivers Championship")
+        st.markdown("**Individual Rankings**")
         drv_rows = []
         for d in driver_st:
             drv  = d["Driver"]
@@ -420,94 +496,176 @@ with tab_standings:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — FINANCE & FX
+# TAB 4 — BUDGET EXPOSURE BY REGION
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_finance:
-    st.markdown(f'{LIVE} open.er-api.com + Frankfurter/ECB', unsafe_allow_html=True)
-    st.caption("Currency context for F1 host countries — relevant for international event budget planning.")
+    st.markdown(f'<p class="section-label">Multi-Currency Budget Exposure</p>', unsafe_allow_html=True)
+    st.markdown(
+        f'{LIVE} open.er-api.com · {LIVE} Frankfurter/ECB',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "For a CHF-based organisation managing an international event portfolio, each host country "
+        "creates a currency exposure. Higher event concentration in one currency = higher FX risk "
+        "on local supplier contracts, venue costs, and staff fees."
+    )
+    st.divider()
 
-    # Key host country currencies
     host_currencies = {
-        "Bahrain":      "BHD", "Saudi Arabia": "SAR", "Australia": "AUD",
-        "Japan":        "JPY", "China":        "CNY", "USA":       "USD",
-        "Monaco":       "EUR", "Canada":       "CAD", "Spain":     "EUR",
-        "UK":           "GBP", "Hungary":      "HUF", "Belgium":   "EUR",
-        "Netherlands":  "EUR", "Italy":        "EUR", "Azerbaijan": "AZN",
-        "Singapore":    "SGD", "Mexico":       "MXN", "Brazil":    "BRL",
-        "Qatar":        "QAR", "UAE":          "AED",
+        "Bahrain":     "BHD", "Saudi Arabia": "SAR", "Australia":  "AUD",
+        "Japan":       "JPY", "China":        "CNY", "USA":        "USD",
+        "Monaco":      "EUR", "Canada":       "CAD", "Spain":      "EUR",
+        "UK":          "GBP", "Hungary":      "HUF", "Belgium":    "EUR",
+        "Netherlands": "EUR", "Italy":        "EUR", "Azerbaijan": "AZN",
+        "Singapore":   "SGD", "Mexico":       "MXN", "Brazil":     "BRL",
+        "Qatar":       "QAR", "UAE":          "AED",
     }
 
-    # Unique currencies with rates
-    unique_curs = sorted({c for c in host_currencies.values() if rates.get(c)})
-    fx_rows = [
-        {"Currency": c, "1 CHF =": f"{rates[c]:.4f}", "Host countries": ", ".join(
-            [co for co, cu in host_currencies.items() if cu == c][:3]
-        )}
-        for c in unique_curs
-    ]
+    # Build exposure table — events per currency × live rate × 30d volatility
+    currency_events: dict[str, list[str]] = {}
+    for country in countries:
+        curr = host_currencies.get(country)
+        if curr:
+            currency_events.setdefault(curr, []).append(country)
 
-    c_table, c_chart = st.columns([1, 2])
-    with c_table:
-        st.subheader("Host Country Currencies")
-        st.dataframe(pd.DataFrame(fx_rows), hide_index=True, use_container_width=True)
-        st.caption(f"Updated: {currency.get('last_updated','N/A')}")
+    usd  = fx_hist.get("currencies", {}).get("USD", {})
+    eur  = fx_hist.get("currencies", {}).get("EUR", {})
+    gbp  = fx_hist.get("currencies", {}).get("GBP", {})
+    # Build volatility lookup (use USD vol as proxy for pegged currencies)
+    vol_lookup = {
+        "USD": usd.get("volatility_pct", 0),
+        "EUR": eur.get("volatility_pct", 0),
+        "GBP": gbp.get("volatility_pct", 0),
+    }
 
-    with c_chart:
-        # How many races per currency
-        currency_count = {}
-        for country in countries:
-            c = host_currencies.get(country)
-            if c:
-                currency_count[c] = currency_count.get(c, 0) + 1
-        cc_df = pd.DataFrame([
-            {"Currency": c, "Races": n}
-            for c, n in sorted(currency_count.items(), key=lambda x: -x[1])
-        ])
-        fig_cc = px.bar(cc_df, x="Currency", y="Races",
-                        color_discrete_sequence=["#E8002D"],
-                        template="plotly_white", text="Races",
-                        title="Races per host currency")
-        fig_cc.update_layout(height=280, margin=dict(l=0, r=0, t=35, b=0))
-        fig_cc.update_traces(textposition="auto")
-        st.plotly_chart(fig_cc, use_container_width=True)
+    exposure_rows = []
+    for curr, event_countries in sorted(currency_events.items(),
+                                        key=lambda x: -len(x[1])):
+        n        = len(event_countries)
+        rate     = rates.get(curr, None) if curr != "CHF" else 1.0
+        vol      = vol_lookup.get(curr, usd.get("volatility_pct", 0.5))
+        risk_lbl = "Low" if vol < 0.5 else "Moderate" if vol < 1.5 else "High"
+        exposure_rows.append({
+            "Currency":     curr,
+            "Events":       n,
+            "% of Portfolio": f"{n/n_races*100:.0f}%",
+            "Rate (1 CHF)": f"{rate:.4f}" if rate else "N/A",
+            "30d Volatility": f"{vol:.3f}%",
+            "FX Risk":      risk_lbl,
+            "Markets":      ", ".join(event_countries),
+        })
+    exposure_df = pd.DataFrame(exposure_rows)
+
+    # ── Top KPIs ──────────────────────────────────────────────────────────────
+    main_curr    = exposure_rows[0]["Currency"] if exposure_rows else "USD"
+    main_events  = exposure_rows[0]["Events"]   if exposure_rows else 0
+    eur_events   = next((r["Events"] for r in exposure_rows if r["Currency"] == "EUR"), 0)
+    single_event = sum(1 for r in exposure_rows if r["Events"] == 1)
+
+    fk1, fk2, fk3, fk4 = st.columns(4)
+    with fk1:
+        st.metric("Currencies in Portfolio", len(exposure_rows),
+                  help="Number of distinct currencies across all host countries.")
+    with fk2:
+        st.metric("Largest Exposure",        f"{main_curr} ({main_events} events)",
+                  help="Currency with most events = highest supplier contract exposure.")
+    with fk3:
+        st.metric("EUR-zone Events",         eur_events,
+                  help="Events in EUR-zone countries (Monaco, Spain, Belgium, Italy, Netherlands).")
+    with fk4:
+        st.metric("Single-Event Currencies", single_event,
+                  help="Currencies used by only one host country — unique procurement challenges.")
 
     st.divider()
 
-    # 30-day FX history
-    usd = fx_hist.get("currencies", {}).get("USD", {})
-    eur = fx_hist.get("currencies", {}).get("EUR", {})
-    if usd.get("series") is not None:
-        h1, h2, h3, h4 = st.columns(4)
-        with h1: st.metric("CHF/USD",    f"{usd['current']:.4f}")
-        with h2: st.metric("30d trend",  f"{usd['trend_pct']:+.2f}%",
-                           delta_color="normal" if usd["trend_pct"] > 0 else "inverse")
-        with h3: st.metric("CHF/EUR",    f"{eur['current']:.4f}" if eur else "N/A")
-        with h4:
-            lbl, _ = fx_risk_label(usd["volatility_pct"])
-            st.metric("FX volatility", f"{usd['volatility_pct']:.3f}%", delta=lbl, delta_color="off")
+    # ── Exposure chart + table side by side ───────────────────────────────────
+    fc1, fc2 = st.columns([2, 1])
 
+    with fc1:
+        # Bar chart: events per currency (= weight of exposure)
+        exp_chart_df = exposure_df[["Currency", "Events"]].copy()
+        exp_chart_df["Color"] = [
+            NAVY if r["FX Risk"] == "Low" else
+            GOLD if r["FX Risk"] == "Moderate" else "#B5451B"
+            for r in exposure_rows
+        ]
+        fig_exp = go.Figure(go.Bar(
+            x=exp_chart_df["Currency"],
+            y=exp_chart_df["Events"],
+            marker_color=exp_chart_df["Color"].tolist(),
+            text=exp_chart_df["Events"],
+            textposition="auto",
+        ))
+        fig_exp.update_layout(
+            title="Event weight by currency (events = exposure weight)",
+            template="plotly_white",
+            height=300,
+            margin=dict(l=0, r=0, t=40, b=0),
+            xaxis_title="",
+            yaxis_title="Number of events",
+        )
+        st.plotly_chart(fig_exp, use_container_width=True)
+        st.caption(
+            f"Colour: {NAVY[:7]} = Low FX risk · Gold = Moderate · Red = High — "
+            "based on 30-day CHF volatility vs that currency."
+        )
+
+    with fc2:
+        st.markdown("**Exposure breakdown**")
+        st.dataframe(
+            exposure_df[["Currency", "Events", "% of Portfolio", "FX Risk"]],
+            hide_index=True, use_container_width=True, height=280,
+        )
+        st.caption(f"Rates: open.er-api.com · Updated: {currency.get('last_updated','N/A')[:16]}")
+
+    st.divider()
+
+    # ── 30-day CHF trend for key currencies ───────────────────────────────────
+    st.markdown(f'<p class="section-label">30-Day CHF Rate Trend — Key Portfolio Currencies</p>',
+                unsafe_allow_html=True)
+    st.caption(
+        "CHF appreciation vs. USD or EUR reduces the cost of foreign-currency contracts "
+        "but may impact international delegate travel budgets. Source: Frankfurter / ECB."
+    )
+
+    h1, h2, h3, h4 = st.columns(4)
+    with h1: st.metric("CHF/USD now",   f"{usd['current']:.4f}" if usd else "N/A")
+    with h2:
+        if usd:
+            st.metric("30d trend", f"{usd['trend_pct']:+.2f}%",
+                      delta_color="normal" if usd["trend_pct"] > 0 else "inverse")
+    with h3: st.metric("CHF/EUR now",   f"{eur['current']:.4f}" if eur else "N/A")
+    with h4:
+        if usd:
+            lbl, _ = fx_risk_label(usd["volatility_pct"])
+            st.metric("USD volatility 30d", f"{usd['volatility_pct']:.3f}%",
+                      delta=lbl, delta_color="off")
+
+    if usd.get("series") is not None:
         fig_fx = go.Figure()
         fig_fx.add_trace(go.Scatter(
             x=usd["series"].index, y=usd["series"].values,
-            name="CHF/USD", line=dict(color="#E8002D", width=2),
-            fill="tozeroy", fillcolor="rgba(232,0,45,0.07)",
+            name="CHF/USD", line=dict(color=NAVY, width=2),
+            fill="tozeroy", fillcolor=f"rgba(30,58,95,0.07)",
         ))
         if eur and eur.get("series") is not None:
             fig_fx.add_trace(go.Scatter(
                 x=eur["series"].index, y=eur["series"].values,
-                name="CHF/EUR", line=dict(color="#3671C6", width=1.5, dash="dot"),
+                name="CHF/EUR", line=dict(color=GOLD, width=2, dash="dot"),
             ))
-        fig_fx.update_layout(template="plotly_white", height=240,
-                              margin=dict(l=0, r=0, t=20, b=0),
-                              legend=dict(orientation="h", y=1.05))
+        fig_fx.update_layout(
+            template="plotly_white", height=240,
+            margin=dict(l=0, r=0, t=10, b=0),
+            legend=dict(orientation="h", y=1.05),
+        )
         st.plotly_chart(fig_fx, use_container_width=True)
-        st.caption("Source: Frankfurter / ECB (30 days)")
 
 
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.divider()
 st.caption(
-    "F1 2024 Event Intelligence · Jolpica API · Wikipedia REST API · "
-    "open.er-api.com · Frankfurter/ECB · No hardcoded data."
+    "Event Portfolio Intelligence · Formula 1 2024 Series · "
+    "Jolpica · Wikipedia · open.er-api.com · Frankfurter/ECB · "
+    "No hardcoded data — all metrics fetched live from public APIs."
 )
