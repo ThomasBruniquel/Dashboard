@@ -269,8 +269,8 @@ st.caption(
 )
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_season, tab_results, tab_standings, tab_finance, tab_participants = st.tabs([
-    "Portfolio Overview", "Event Detail", "Performance Rankings", "Budget Exposure", "Participants"
+tab_season, tab_participants, tab_results, tab_standings, tab_finance = st.tabs([
+    "Portfolio Overview", "Participants", "Event Detail", "Performance Rankings", "Budget Exposure"
 ])
 
 
@@ -866,8 +866,13 @@ with tab_participants:
         fig_perf = go.Figure()
 
         # Bar: points per race
+        def _hex_rgba(hex_c: str, alpha: float) -> str:
+            h = hex_c.lstrip("#")
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+            return f"rgba({r},{g},{b},{alpha})"
+
         bar_colors = [
-            team_color if r["position"] <= 3 else f"{team_color}88"
+            team_color if r["position"] <= 3 else _hex_rgba(team_color, 0.35)
             for r in results
         ]
         fig_perf.add_trace(go.Bar(
