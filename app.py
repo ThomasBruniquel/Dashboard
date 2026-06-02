@@ -90,9 +90,19 @@ st.markdown(f"""
 
     /* Section labels */
     .section-label {{
-        font-size: 0.68rem; font-weight: 700; color: {GOLD};
-        text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px;
+        font-size: 0.75rem; font-weight: 700; color: {GOLD};
+        text-transform: uppercase; letter-spacing: 0.09em; margin-bottom: 6px;
     }}
+
+    /* Tab content headings */
+    .stTabs [data-testid="stMarkdownContainer"] h1,
+    .stTabs [data-testid="stMarkdownContainer"] h2,
+    .stTabs [data-testid="stMarkdownContainer"] h3 {{
+        color: {NAVY};
+    }}
+    h1 {{ font-size: 1.9rem !important; font-weight: 700; color: {NAVY}; }}
+    h2 {{ font-size: 1.3rem !important; font-weight: 700; color: {NAVY}; }}
+    h3 {{ font-size: 1.05rem !important; font-weight: 600; color: {NAVY}; }}
 
     /* Source / API box */
     .api-box {{
@@ -326,18 +336,34 @@ with tab_season:
         color="Status",
         color_discrete_map={"Delivered": NAVY, "Upcoming": GOLD},
         template="plotly_white",
-        title=f"Portfolio deployment — {n_races} events across {n_countries} countries",
+        title=f"Portfolio deployment — {n_races} events · {n_countries} countries · {completed_events} delivered",
     )
-    fig_map.update_traces(marker=dict(size=10, opacity=0.9))
+    fig_map.update_traces(
+        marker=dict(size=11, opacity=0.92, line=dict(width=1, color="white")),
+    )
     fig_map.update_layout(
-        height=380,
-        margin=dict(l=0, r=0, t=40, b=0),
-        legend=dict(orientation="h", y=-0.02, x=0.5, xanchor="center"),
-        geo=dict(showland=True, landcolor="#EEF2F7",
-                 showocean=True, oceancolor="#F8FAFC",
-                 showcoastlines=True, coastlinecolor="#CBD5E1"),
+        height=480,                       # larger map
+        margin=dict(l=0, r=0, t=44, b=0),
+        uirevision="f1_map_2024",         # preserves zoom/pan state — frame stays fixed on interaction
+        legend=dict(orientation="h", y=-0.01, x=0.5, xanchor="center",
+                    font=dict(size=12)),
+        title_font=dict(size=13, color=SLATE),
+        geo=dict(
+            showland=True,        landcolor="#EEF2F7",
+            showocean=True,       oceancolor="#F0F6FF",
+            showcoastlines=True,  coastlinecolor="#CBD5E1",
+            showframe=False,
+            showlakes=True,       lakecolor="#F0F6FF",
+            showcountries=True,   countrycolor="#E2E8F0",
+            projection_type="natural earth",
+        ),
     )
-    st.plotly_chart(fig_map, use_container_width=True)
+    st.plotly_chart(fig_map, use_container_width=True, config={
+        "scrollZoom": True,           # enable scroll-to-zoom
+        "displayModeBar": True,
+        "modeBarButtonsToRemove": ["select2d", "lasso2d", "toggleSpikelines"],
+        "toImageButtonOptions": {"format": "png", "filename": "f1_portfolio_map"},
+    })
 
     # ── Event calendar table ──────────────────────────────────────────────────
     st.markdown(f'<p class="section-label">Event Portfolio Calendar</p>', unsafe_allow_html=True)
@@ -359,8 +385,17 @@ with tab_season:
             "Entity":      w.get("team", "—"),
         })
     cal_df = pd.DataFrame(cal_rows)
-    st.dataframe(cal_df, hide_index=True, use_container_width=True, height=480)
-    st.caption("Source: Jolpica API (no API key required)")
+    st.dataframe(
+        cal_df, hide_index=True, use_container_width=True,
+        height=min(50 + len(cal_df) * 35, 520),   # auto-fit, max 520px
+        column_config={
+            "#":          st.column_config.NumberColumn(width="small"),
+            "Status":     st.column_config.TextColumn(width="small"),
+            "Top Result": st.column_config.TextColumn(width="medium"),
+            "Entity":     st.column_config.TextColumn(width="medium"),
+        },
+    )
+    st.caption("Source: Jolpica API — no API key required")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
