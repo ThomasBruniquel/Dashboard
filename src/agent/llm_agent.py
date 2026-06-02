@@ -1,242 +1,38 @@
 """
-Agentic LLM layer with real function calling.
+Streaming agent — RAG + streaming LLM synthesis.
 
-Primary:  OpenRouter + Qwen3 (free, works on Streamlit Cloud)
-Fallback: Groq + Llama-3.3-70b (free, function calling supported)
-Both use the OpenAI SDK — same code, different base_url.
+Flow per question:
+  1. Fetch relevant F1 data from Jolpica/Wikipedia (< 1s, keyword-based)
+  2. Stream LLM synthesis from that context (visible progress, feels instant)
 
-The LLM sees the tool list, decides which to call, we execute,
-it synthesises. Nothing hardcoded — all data fetched at runtime.
-
-Setup:
-  Get a free OpenRouter key at https://openrouter.ai (no CC)
-  Add to .env:  OPENROUTER_API_KEY=sk-or-...
+No function calling roundtrips — data is fetched before the LLM call.
+Supports: OpenRouter (Llama/Gemma/Qwen3 free), Groq, Gemini.
 """
 
 from __future__ import annotations
-import os
-import json
+import os, json
+from typing import Generator
+
 import requests as _req
 import streamlit as st
-from openai import OpenAI
 
-# ── Models — fastest first, auto-fallback on 429 ──────────────────────────────
+# ── Models ─────────────────────────────────────────────────────────────────────
 OPENROUTER_MODELS = [
-    "meta-llama/llama-3.3-70b-instruct:free",       # fast, reliable function calling
-    "google/gemma-4-31b-it:free",                    # good fallback
-    "qwen/qwen3-next-80b-a3b-instruct:free",         # large, can be slow on free tier
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-4-31b-it:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
 ]
-OPENROUTER_MODEL = OPENROUTER_MODELS[0]   # shown in UI
-GROQ_MODEL       = "llama-3.3-70b-versatile"
-GEMINI_MODEL     = "gemini-2.5-flash-lite"
-
-CALL_TIMEOUT = 25   # seconds per LLM call — avoids infinite hangs on slow models
+GROQ_MODEL   = "llama-3.3-70b-versatile"
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 SYSTEM = (
-    "You are an F1 racing intelligence assistant with access to real-time data tools.\n"
-    "ALWAYS use your tools to answer — never rely on training data for statistics or results.\n"
-    "Answer in the user's language (French if they write French).\n"
-    "Be concise: 2–4 sentences for simple questions. Use **bold** for key numbers.\n"
-    "When a user mentions a race name (e.g. 'Monaco', 'Japan'), find its round number "
-    "from the calendar tool first if you don't already know it."
+    "You are an F1 racing intelligence assistant. "
+    "Answer using ONLY the live F1 data provided below — never use training memory for stats. "
+    "Answer in the user's language (French if they write French). "
+    "Be concise: 2-4 sentences for simple questions. Bold key numbers."
 )
 
-
-# ── Tool definitions ───────────────────────────────────────────────────────────
-TOOLS: list[dict] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_race_calendar",
-            "description": "Get the complete F1 race calendar for a year: round numbers, race names, circuits, countries, dates.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "year": {"type": "integer", "description": "Season year, e.g. 2024"}
-                },
-                "required": ["year"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_race_results",
-            "description": "Get the top-10 finishing order, times and points for a specific Grand Prix.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "year":  {"type": "integer"},
-                    "round": {"type": "integer", "description": "Round number (1–24). Use get_race_calendar first if unsure."},
-                },
-                "required": ["year", "round"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_driver_standings",
-            "description": "Get the Drivers' World Championship standings (points, wins) for a season.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "year": {"type": "integer"}
-                },
-                "required": ["year"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_constructor_standings",
-            "description": "Get the Constructors' World Championship standings for a season.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "year": {"type": "integer"}
-                },
-                "required": ["year"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_exchange_rates",
-            "description": "Get current live CHF exchange rates from open.er-api.com.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "currencies": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "ISO currency codes, e.g. ['USD', 'EUR', 'GBP', 'JPY']",
-                    }
-                },
-                "required": ["currencies"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_wikipedia",
-            "description": "Search Wikipedia for information about an F1 driver, team, circuit, or race.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Search query, e.g. 'Max Verstappen career'"}
-                },
-                "required": ["query"],
-            },
-        },
-    },
-]
-
-
-# ── Tool execution ─────────────────────────────────────────────────────────────
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _jolpica(path: str) -> dict:
-    resp = _req.get(f"https://api.jolpi.ca/ergast/f1/{path}",
-                    params={"format": "json", "limit": 30}, timeout=15)
-    resp.raise_for_status()
-    return resp.json()["MRData"]
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _er_api() -> dict:
-    return _req.get("https://open.er-api.com/v6/latest/CHF", timeout=10).json().get("rates", {})
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _wiki(query: str) -> str:
-    headers = {"User-Agent": "F1Dashboard/1.0 (portfolio; python-requests)"}
-    search  = _req.get("https://en.wikipedia.org/w/api.php",
-                       params={"action": "query", "list": "search", "srsearch": query,
-                               "srlimit": 1, "format": "json"},
-                       headers=headers, timeout=10).json()
-    results = search.get("query", {}).get("search", [])
-    if not results:
-        return "No Wikipedia result found."
-    title = results[0]["title"]
-    slug  = title.replace(" ", "_")
-    resp  = _req.get(f"https://en.wikipedia.org/api/rest_v1/page/summary/{slug}",
-                     headers=headers, timeout=10)
-    if resp.status_code == 200:
-        d = resp.json()
-        return f"{title}\n{d.get('extract','')[:600]}\n{d.get('content_urls',{}).get('desktop',{}).get('page','')}"
-    return f"Article '{title}' unavailable."
-
-
-def _execute(name: str, args: dict) -> str:
-    try:
-        if name == "get_race_calendar":
-            races = _jolpica(f"{args['year']}/races/")["RaceTable"]["Races"]
-            return json.dumps([{
-                "round":   r["round"],
-                "name":    r["raceName"],
-                "circuit": r["Circuit"]["circuitName"],
-                "country": r["Circuit"]["Location"]["country"],
-                "date":    r["date"],
-            } for r in races])
-
-        if name == "get_race_results":
-            data = _jolpica(f"{args['year']}/{args['round']}/results/")["RaceTable"]["Races"]
-            if not data:
-                return "Results not available."
-            race    = data[0]
-            results = race.get("Results", [])
-            return json.dumps({
-                "race":    race["raceName"],
-                "date":    race["date"],
-                "circuit": race["Circuit"]["circuitName"],
-                "results": [{
-                    "pos":    r["position"],
-                    "driver": f"{r['Driver']['givenName']} {r['Driver']['familyName']}",
-                    "team":   r["Constructor"]["name"],
-                    "time":   r.get("Time", {}).get("time", r.get("status", "—")),
-                    "points": r.get("points", "0"),
-                } for r in results[:10]],
-            })
-
-        if name == "get_driver_standings":
-            lists = _jolpica(f"{args['year']}/driverstandings/")["StandingsTable"]["StandingsLists"]
-            if not lists:
-                return "Standings not available."
-            return json.dumps([{
-                "pos":    s["position"],
-                "driver": f"{s['Driver']['givenName']} {s['Driver']['familyName']}",
-                "team":   s["Constructors"][0]["name"],
-                "points": s["points"],
-                "wins":   s["wins"],
-            } for s in lists[0]["DriverStandings"]])
-
-        if name == "get_constructor_standings":
-            lists = _jolpica(f"{args['year']}/constructorstandings/")["StandingsTable"]["StandingsLists"]
-            if not lists:
-                return "Standings not available."
-            return json.dumps([{
-                "pos":    s["position"],
-                "team":   s["Constructor"]["name"],
-                "points": s["points"],
-                "wins":   s["wins"],
-            } for s in lists[0]["ConstructorStandings"]])
-
-        if name == "get_exchange_rates":
-            all_rates = _er_api()
-            rates     = {c: all_rates[c] for c in args.get("currencies", []) if c in all_rates}
-            return json.dumps({"base": "CHF", "rates": rates})
-
-        if name == "search_wikipedia":
-            return _wiki(args.get("query", ""))
-
-        return f"Unknown tool: {name}"
-
-    except Exception as e:
-        return f"Tool error: {e}"
+CALL_TIMEOUT = 30
 
 
 # ── Provider ───────────────────────────────────────────────────────────────────
@@ -252,190 +48,297 @@ def is_available() -> bool:
 
 def model_label() -> str:
     p = _provider()
-    if p == "openrouter": return f"Qwen3-30B (OpenRouter)"
-    if p == "groq":       return f"Llama-3.3-70B (Groq)"
+    if p == "openrouter": return "Llama-3.3-70B (OpenRouter)"
+    if p == "groq":       return "Llama-3.3-70B (Groq)"
     if p == "gemini":     return f"{GEMINI_MODEL} (Gemini)"
     return "none"
 
 
-def _openai_client(provider: str) -> OpenAI:
-    """Create a fresh client each time — avoids caching a client with a missing key."""
-    if provider == "openrouter":
-        return OpenAI(
-            api_key=os.getenv("OPENROUTER_API_KEY"),
-            base_url="https://openrouter.ai/api/v1",
-            timeout=CALL_TIMEOUT,
-            default_headers={
-                "HTTP-Referer": "https://f1-event-intelligence.streamlit.app",
-                "X-Title":      "F1 Event Intelligence",
-            },
-        )
-    if provider == "groq":
-        return OpenAI(
-            api_key=os.getenv("GROQ_API_KEY"),
-            base_url="https://api.groq.com/openai/v1",
-            timeout=CALL_TIMEOUT,
-        )
-    raise ValueError(f"Unknown provider: {provider}")
+# ── Fast data fetchers (cached) ────────────────────────────────────────────────
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _jolpica(path: str) -> dict:
+    r = _req.get(f"https://api.jolpi.ca/ergast/f1/{path}",
+                 params={"format": "json", "limit": 30}, timeout=10)
+    r.raise_for_status()
+    return r.json()["MRData"]
 
 
-# ── Raw HTTP call (guaranteed timeout, no SDK issues) ─────────────────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def _er_rates() -> dict:
+    r = _req.get("https://open.er-api.com/v6/latest/CHF", timeout=10)
+    return r.json().get("rates", {})
 
-def _openrouter_call(model: str, messages: list, tools: list | None = None) -> dict:
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _wiki_summary(query: str) -> str:
+    headers = {"User-Agent": "F1Dashboard/1.0"}
+    s = _req.get("https://en.wikipedia.org/w/api.php",
+                 params={"action": "query", "list": "search", "srsearch": query,
+                         "srlimit": 1, "format": "json"},
+                 headers=headers, timeout=8).json()
+    hits = s.get("query", {}).get("search", [])
+    if not hits:
+        return ""
+    title = hits[0]["title"]
+    r = _req.get(f"https://en.wikipedia.org/api/rest_v1/page/summary/{title.replace(' ','_')}",
+                 headers=headers, timeout=8)
+    if r.status_code == 200:
+        return r.json().get("extract", "")[:500]
+    return ""
+
+
+# ── RAG: keyword-based context fetching ───────────────────────────────────────
+
+_RACE_NAMES = {
+    "bahrain": 1, "saudi": 2, "australian": 3, "japan": 4, "japanese": 4,
+    "chinese": 5, "china": 5, "miami": 6, "emilia": 7, "romagna": 7,
+    "monaco": 8, "canadian": 9, "canada": 9, "spanish": 10, "spain": 10,
+    "austrian": 11, "austria": 11, "british": 12, "uk": 12, "hungarian": 13,
+    "hungarian": 13, "belgium": 14, "belgian": 14, "dutch": 15,
+    "netherlands": 15, "italian": 16, "italy": 16, "monza": 16,
+    "azerbaijan": 17, "baku": 17, "singapore": 18, "united states": 19,
+    "austin": 19, "mexico": 20, "brazil": 21, "sao paulo": 21,
+    "las vegas": 22, "vegas": 22, "qatar": 23, "abu dhabi": 24,
+}
+
+_STANDINGS_KW = ("standing", "classement", "champion", "points", "leader",
+                  "who leads", "qui mène", "qui est en tête")
+_RESULT_KW    = ("winner", "vainqueur", "gagné", "won", "résultat", "result",
+                  "podium", "finish", "first", "premier")
+_CALENDAR_KW  = ("calendar", "calendrier", "schedule", "when", "quand",
+                  "races", "courses", "date")
+_CURRENCY_KW  = ("chf", "eur", "usd", "franc", "currency", "monnaie",
+                  "taux", "rate", "convert")
+
+
+def fetch_context(question: str) -> tuple[str, list[str]]:
     """
-    Direct requests call to OpenRouter — hard 15s timeout, no SDK wrapping.
-    Returns the raw API response dict.
+    Fetch relevant F1 data in < 1s based on question keywords.
+    Returns (context_string, list_of_sources).
     """
-    payload: dict = {
-        "model":       model,
-        "messages":    messages,
-        "temperature": 0.1,
-        "max_tokens":  400,
-    }
-    if tools:
-        payload["tools"]       = tools
-        payload["tool_choice"] = "auto"
+    q       = question.lower()
+    parts:   list[str] = []
+    sources: list[str] = []
 
+    # Driver standings — almost always useful
+    try:
+        sl = _jolpica("2024/driverstandings/")["StandingsTable"]["StandingsLists"]
+        if sl:
+            top = sl[0]["DriverStandings"][:5]
+            parts.append("2024 Driver Standings (top 5): " + json.dumps([{
+                "pos":    s["position"],
+                "driver": f"{s['Driver']['givenName']} {s['Driver']['familyName']}",
+                "team":   s["Constructors"][0]["name"],
+                "points": s["points"],
+                "wins":   s["wins"],
+            } for s in top]))
+            sources.append("Jolpica — driver_standings(2024)")
+    except Exception:
+        pass
+
+    # Constructor standings if relevant
+    if any(w in q for w in ("constructor", "team", "constructeur", "équipe", "mclaren",
+                             "ferrari", "red bull", "mercedes", "aston")):
+        try:
+            cl = _jolpica("2024/constructorstandings/")["StandingsTable"]["StandingsLists"]
+            if cl:
+                parts.append("2024 Constructor Standings: " + json.dumps([{
+                    "pos":    s["position"],
+                    "team":   s["Constructor"]["name"],
+                    "points": s["points"],
+                } for s in cl[0]["ConstructorStandings"]]))
+                sources.append("Jolpica — constructor_standings(2024)")
+        except Exception:
+            pass
+
+    # Race-specific results
+    for kw, rnd in _RACE_NAMES.items():
+        if kw in q:
+            try:
+                races = _jolpica(f"2024/{rnd}/results/")["RaceTable"]["Races"]
+                if races:
+                    res = races[0]["Results"][:10]
+                    parts.append(f"Round {rnd} — {races[0]['raceName']} results: " + json.dumps([{
+                        "pos":    r["position"],
+                        "driver": f"{r['Driver']['givenName']} {r['Driver']['familyName']}",
+                        "team":   r["Constructor"]["name"],
+                        "time":   r.get("Time", {}).get("time", r.get("status", "")),
+                        "points": r.get("points", "0"),
+                    } for r in res]))
+                    sources.append(f"Jolpica — race_results(2024, round={rnd})")
+            except Exception:
+                pass
+            break
+
+    # Full calendar if asked about schedule/dates
+    if any(w in q for w in _CALENDAR_KW):
+        try:
+            races = _jolpica("2024/races/")["RaceTable"]["Races"]
+            parts.append("2024 F1 Calendar: " + json.dumps([{
+                "round":   r["round"],
+                "name":    r["raceName"],
+                "country": r["Circuit"]["Location"]["country"],
+                "date":    r["date"],
+            } for r in races]))
+            sources.append("Jolpica — race_calendar(2024)")
+        except Exception:
+            pass
+
+    # Exchange rates
+    if any(w in q for w in _CURRENCY_KW):
+        try:
+            rates = _er_rates()
+            subset = {c: rates[c] for c in ("EUR", "USD", "GBP", "JPY", "AED", "QAR") if c in rates}
+            parts.append("Live CHF rates: " + json.dumps(subset))
+            sources.append("open.er-api.com — exchange_rates(CHF)")
+        except Exception:
+            pass
+
+    # Wikipedia for biographical/circuit questions
+    if any(w in q for w in ("who is", "qui est", "circuit", "pilote", "driver",
+                              "histoire", "history", "career", "carrière", "biograph")):
+        try:
+            wiki = _wiki_summary(question[:80])
+            if wiki:
+                parts.append("Wikipedia: " + wiki)
+                sources.append(f"Wikipedia — search('{question[:40]}')")
+        except Exception:
+            pass
+
+    ctx = "\n\n".join(parts) if parts else "No specific F1 data retrieved for this question."
+    return ctx, sources
+
+
+# ── Streaming LLM calls ────────────────────────────────────────────────────────
+
+def _stream_openrouter(messages: list) -> Generator[str, None, None]:
+    """Stream from OpenRouter — tries models in order on 429."""
+    for model in OPENROUTER_MODELS:
+        try:
+            with _req.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+                    "Content-Type":  "application/json",
+                    "HTTP-Referer":  "https://f1-event-intelligence.streamlit.app",
+                    "X-Title":       "F1 Event Intelligence",
+                },
+                json={
+                    "model":       model,
+                    "messages":    messages,
+                    "stream":      True,
+                    "temperature": 0.1,
+                    "max_tokens":  400,
+                },
+                stream=True,
+                timeout=CALL_TIMEOUT,
+            ) as resp:
+                if resp.status_code == 429:
+                    continue
+                resp.raise_for_status()
+                for raw in resp.iter_lines():
+                    if not raw:
+                        continue
+                    line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+                    if line == "data: [DONE]":
+                        return
+                    if line.startswith("data: "):
+                        try:
+                            chunk = json.loads(line[6:])
+                            content = chunk["choices"][0]["delta"].get("content") or ""
+                            if content:
+                                yield content
+                        except Exception:
+                            continue
+                return   # streamed successfully
+
+        except (_req.exceptions.Timeout, _req.exceptions.ConnectionError):
+            continue
+        except _req.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 429:
+                continue
+            yield f"Erreur réseau : {e}"
+            return
+
+    yield "Tous les modèles OpenRouter sont indisponibles — réessayez dans 30 s."
+
+
+def _stream_groq(messages: list) -> Generator[str, None, None]:
+    from openai import OpenAI
+    client = OpenAI(api_key=os.getenv("GROQ_API_KEY"),
+                    base_url="https://api.groq.com/openai/v1", timeout=CALL_TIMEOUT)
+    with client.chat.completions.stream(
+        model=GROQ_MODEL, messages=messages, temperature=0.1, max_tokens=400
+    ) as stream:
+        for chunk in stream.text_stream:
+            yield chunk
+
+
+def _stream_gemini(messages: list) -> Generator[str, None, None]:
+    """Gemini doesn't support true streaming via REST — yield full response."""
+    key = os.getenv("GEMINI_API_KEY")
+    # Convert messages to Gemini format
+    system_text = next((m["content"] for m in messages if m["role"] == "system"), "")
+    contents    = [
+        {"role": "model" if m["role"] == "assistant" else "user",
+         "parts": [{"text": m["content"]}]}
+        for m in messages if m["role"] in ("user", "assistant") and m.get("content")
+    ]
     resp = _req.post(
-        "https://openrouter.ai/api/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
-            "Content-Type":  "application/json",
-            "HTTP-Referer":  "https://f1-event-intelligence.streamlit.app",
-            "X-Title":       "F1 Event Intelligence",
+        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={key}",
+        json={
+            "system_instruction": {"parts": [{"text": system_text}]},
+            "contents":           contents,
+            "generationConfig":   {"maxOutputTokens": 400, "temperature": 0.1},
         },
-        json=payload,
-        timeout=15,   # hard timeout — always respected by requests
+        timeout=CALL_TIMEOUT,
     )
     resp.raise_for_status()
-    return resp.json()
+    parts = resp.json()["candidates"][0]["content"].get("parts", [])
+    text  = "".join(p.get("text", "") for p in parts).strip()
+    # Simulate streaming by yielding words
+    for word in text.split(" "):
+        yield word + " "
 
 
-# ── Agentic loop ───────────────────────────────────────────────────────────────
+# ── Public streaming entry point ───────────────────────────────────────────────
 
-def _function_calling_loop(question: str, history: list[dict], provider: str) -> tuple[str, list[str]]:
-    model_candidates = OPENROUTER_MODELS if provider == "openrouter" else [GROQ_MODEL]
+def ask_streaming(question: str, history: list[dict]) -> tuple[Generator[str, None, None], list[str]]:
+    """
+    Fetch live F1 context (< 1s), then stream the LLM synthesis.
+    Returns (text_chunk_generator, list_of_sources).
+    Call this with st.write_stream(generator).
+    """
+    ctx, sources = fetch_context(question)
 
-    messages: list[dict] = [{"role": "system", "content": SYSTEM}]
+    messages = [{
+        "role":    "system",
+        "content": f"{SYSTEM}\n\n## Live F1 data (fetched now, not from training)\n\n{ctx}",
+    }]
     for m in history[-6:]:
         if m["role"] in ("user", "assistant") and m.get("content"):
             messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": question})
 
-    tools_called: list[str] = []
+    p = _provider()
+    if p == "openrouter":
+        gen = _stream_openrouter(messages)
+    elif p == "groq":
+        gen = _stream_groq(messages)
+    elif p == "gemini":
+        gen = _stream_gemini(messages)
+    else:
+        def _no_key():
+            yield "Aucune clé LLM configurée. Ajoutez `OPENROUTER_API_KEY` dans `.env`."
+        gen = _no_key()
 
-    for candidate in model_candidates:
-        msgs = list(messages)
-
-        try:
-            for _ in range(5):   # max 5 tool-call rounds
-                if provider == "openrouter":
-                    data   = _openrouter_call(candidate, msgs, TOOLS)
-                    choice = data["choices"][0]
-                    raw    = choice["message"]
-                    # Normalise to simple dict
-                    content    = raw.get("content") or ""
-                    tool_calls = raw.get("tool_calls") or []
-                    msgs.append(raw)   # append raw dict to history
-                else:
-                    # Groq via OpenAI SDK (fast, reliable)
-                    client = _openai_client(provider)
-                    resp   = client.chat.completions.create(
-                        model=GROQ_MODEL, messages=msgs, tools=TOOLS,
-                        tool_choice="auto", temperature=0.1, max_tokens=400,
-                    )
-                    sdk_msg    = resp.choices[0].message
-                    content    = sdk_msg.content or ""
-                    tool_calls = sdk_msg.tool_calls or []
-                    msgs.append(sdk_msg)
-
-                if not tool_calls:
-                    return content.strip(), tools_called
-
-                # Execute each tool call
-                for tc in tool_calls:
-                    if provider == "openrouter":
-                        tc_id  = tc["id"]
-                        name   = tc["function"]["name"]
-                        args   = json.loads(tc["function"]["arguments"])
-                    else:
-                        tc_id  = tc.id
-                        name   = tc.function.name
-                        args   = json.loads(tc.function.arguments)
-
-                    short_model = candidate.split("/")[-1][:18]
-                    label  = f"{name}({json.dumps(args, ensure_ascii=False)[:50]}) [{short_model}]"
-                    result = _execute(name, args)
-                    tools_called.append(label)
-                    msgs.append({"role": "tool", "tool_call_id": tc_id, "content": result})
-
-            return "Trop d'appels d'outils — réessayez.", tools_called
-
-        except _req.exceptions.Timeout:
-            continue   # timeout → try next model
-        except _req.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == 429:
-                continue   # rate-limited → try next model
-            return f"Erreur réseau : {e}", tools_called
-        except Exception as e:
-            err = str(e)
-            if "rate" in err.lower() or "429" in err or "timeout" in err.lower():
-                continue
-            return f"Erreur : {err[:120]}", tools_called
-
-    return "Tous les modèles sont indisponibles — réessayez dans 30 s.", tools_called
+    return gen, sources
 
 
-def _gemini_rag(question: str, history: list[dict]) -> tuple[str, list[str]]:
-    """Gemini fallback — pre-fetch context and inject (no native function calling)."""
-    key  = os.getenv("GEMINI_API_KEY")
-    url  = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{GEMINI_MODEL}:generateContent?key={key}")
-
-    # Pre-fetch relevant data
-    tools_called: list[str] = []
-    context_parts: list[str] = []
-
-    q = question.lower()
-    if any(w in q for w in ["standing", "classement", "champion", "points", "winner", "vainqueur", "résultat", "result", "win", "gagn"]):
-        dr = _jolpica("2024/driverstandings/")["StandingsTable"]["StandingsLists"]
-        if dr:
-            tools_called.append("get_driver_standings(2024)")
-            context_parts.append("Driver standings 2024: " + json.dumps(
-                [{"pos": s["position"], "driver": f"{s['Driver']['givenName']} {s['Driver']['familyName']}", "pts": s["points"]} for s in dr[0]["DriverStandings"][:5]]
-            ))
-
-    if any(w in q for w in ["race", "course", "grand prix", "monaco", "bahrain", "japan", "uk", "circuit"]):
-        wiki_q = question[:80]
-        context_parts.append("Wikipedia: " + _wiki(wiki_q))
-        tools_called.append(f"search_wikipedia('{wiki_q[:50]}')")
-
-    system = (SYSTEM + "\n\n## Live data\n" + "\n\n".join(context_parts)) if context_parts else SYSTEM
-
-    contents = []
-    for m in history[-6:]:
-        if m["role"] in ("user", "assistant") and m.get("content"):
-            contents.append({"role": "model" if m["role"] == "assistant" else "user",
-                             "parts": [{"text": m["content"]}]})
-    contents.append({"role": "user", "parts": [{"text": question}]})
-
-    resp  = _req.post(url, json={
-        "system_instruction": {"parts": [{"text": system}]},
-        "contents": contents,
-        "generationConfig": {"maxOutputTokens": 400, "temperature": 0.2},
-    }, timeout=25)
-    resp.raise_for_status()
-    parts = resp.json()["candidates"][0]["content"].get("parts", [])
-    return "".join(p.get("text", "") for p in parts).strip(), tools_called
-
-
-# ── Public entry point ─────────────────────────────────────────────────────────
+# ── Non-streaming fallback (kept for compatibility) ────────────────────────────
 
 def ask(question: str, history: list[dict]) -> tuple[str, list[str]]:
-    """Route to the best available provider and run the agentic loop."""
-    p = _provider()
-    if p in ("openrouter", "groq"):
-        return _function_calling_loop(question, history, p)
-    if p == "gemini":
-        return _gemini_rag(question, history)
-    raise RuntimeError("No LLM key configured.")
+    """Non-streaming version — collects full response then returns."""
+    gen, sources = ask_streaming(question, history)
+    return "".join(gen), sources

@@ -103,60 +103,18 @@ for race in winners:
 
 # ── Session state ──────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
-    st.session_state.messages = [{
-        "role": "assistant",
-        "content": (
-            "Bonjour ! Je suis connecté aux données F1 2024 en temps réel (Jolpica API).\n\n"
-            "Demandez-moi : *\"Qui a gagné Monaco ?\"* · *\"Standings constructeurs ?\"* · "
-            "*\"Quel circuit en Japon ?\"* · *\"Taux CHF/USD ?\"*"
-        ),
-        "calls": [],
-    }]
+    st.session_state.messages = []
 using_llm = llm_agent.is_available()
 
-# ── Sidebar — chat ─────────────────────────────────────────────────────────────
+# ── Sidebar — minimal ─────────────────────────────────────────────────────────
 with st.sidebar:
     model_str = llm_agent.model_label() if using_llm else "No LLM key"
-    st.markdown(f"**Assistant** &nbsp; {'🟢 ' + model_str if using_llm else '⚪ ' + model_str}")
+    st.markdown(f"{'🟢' if using_llm else '⚪'} **{model_str}**")
     st.divider()
+    st.caption("🟢 Jolpica · 🟢 Wikipedia · 🟢 open.er-api.com · 🟢 Frankfurter/ECB")
+    if st.button("Refresh data", use_container_width=True):
+        st.cache_data.clear(); st.rerun()
 
-    with st.container(height=480, border=False):
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-                if msg.get("calls"):
-                    with st.expander("Sources", expanded=False):
-                        for c in msg["calls"]:
-                            st.markdown(f'<div class="api-box">{c}</div>', unsafe_allow_html=True)
-
-    with st.form("chat_form", clear_on_submit=True):
-        user_input = st.text_input("msg", placeholder="Votre question F1…", label_visibility="collapsed")
-        submitted  = st.form_submit_button("Envoyer →", use_container_width=True)
-
-    if submitted and user_input.strip():
-        st.session_state.messages.append({"role": "user", "content": user_input, "calls": []})
-        if using_llm:
-            try:
-                # Inject live F1 standings into context for the agent
-                f1_ctx = (
-                    f"[Live F1 2024 data] "
-                    f"Driver leader: {winner_name} ({winner_pts} pts). "
-                    f"Constructor leader: {best_team} ({best_team_pts} pts). "
-                    f"Season: {n_races} races in {n_countries} countries."
-                )
-                augmented = user_input + f"\n\nContext: {f1_ctx}"
-                with st.spinner(f"Agent thinking… ({llm_agent.model_label()}, max 25s)"):
-                    response, calls = llm_agent.ask(augmented, st.session_state.messages[:-1])
-                calls.insert(0, "Jolpica F1 API — season context injected")
-            except Exception as e:
-                response, calls = f"Erreur : {str(e)[:200]}", []
-        else:
-            response = "Ajoutez `GEMINI_API_KEY` dans `.env` pour activer l'agent."
-            calls    = []
-        st.session_state.messages.append({"role": "assistant", "content": response, "calls": calls})
-        st.rerun()
-
-    if len(st.session_state.messages) > 1:
         if st.button("Effacer", use_container_width=True):
             st.session_state.messages = st.session_state.messages[:1]
             st.rerun()
@@ -172,8 +130,8 @@ st.caption(
 )
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
-tab_season, tab_results, tab_standings, tab_finance = st.tabs([
-    "Season Overview", "Race Results", "Championship", "Finance & FX"
+tab_season, tab_results, tab_standings, tab_finance, tab_chat = st.tabs([
+    "Season Overview", "Race Results", "Championship", "Finance & FX", "💬 Chat"
 ])
 
 
@@ -464,6 +422,65 @@ with tab_finance:
                               legend=dict(orientation="h", y=1.05))
         st.plotly_chart(fig_fx, use_container_width=True)
         st.caption("Source: Frankfurter / ECB (30 days)")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — CHAT (streaming, st.chat_input, st.write_stream)
+# ══════════════════════════════════════════════════════════════════════════════
+with tab_chat:
+    model_info = llm_agent.model_label() if using_llm else "No LLM configured"
+    st.caption(
+        f"{'🟢' if using_llm else '⚪'} **{model_info}** · "
+        "Data fetched live from Jolpica, Wikipedia & open.er-api.com before each answer. "
+        "Responses stream word by word."
+    )
+
+    # Render conversation history
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg.get("calls"):
+                with st.expander("Sources", expanded=False):
+                    for c in msg["calls"]:
+                        st.markdown(f'<div class="api-box">{c}</div>', unsafe_allow_html=True)
+
+    # Chat input — native Streamlit, Enter to submit
+    if prompt := st.chat_input("Ask about F1 2024 — qui a gagné Monaco ? classement ? taux CHF ?"):
+        # Show user message immediately
+        st.session_state.messages.append({"role": "user", "content": prompt, "calls": []})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Fetch context & stream response
+        with st.chat_message("assistant"):
+            if using_llm:
+                try:
+                    with st.spinner("Fetching live F1 data…"):
+                        gen, sources = llm_agent.ask_streaming(
+                            prompt, st.session_state.messages[:-1]
+                        )
+                    full_response = st.write_stream(gen)
+                    if sources:
+                        with st.expander("Sources", expanded=False):
+                            for s in sources:
+                                st.markdown(f'<div class="api-box">{s}</div>', unsafe_allow_html=True)
+                except Exception as e:
+                    full_response = f"Erreur : {e}"
+                    sources       = []
+                    st.markdown(full_response)
+            else:
+                full_response = "Ajoutez `OPENROUTER_API_KEY` ou `GEMINI_API_KEY` dans `.env`."
+                sources       = []
+                st.markdown(full_response)
+
+        st.session_state.messages.append({
+            "role": "assistant", "content": full_response, "calls": sources
+        })
+
+    if st.session_state.messages:
+        if st.button("Effacer la conversation", type="secondary"):
+            st.session_state.messages = []
+            st.rerun()
+
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.divider()
