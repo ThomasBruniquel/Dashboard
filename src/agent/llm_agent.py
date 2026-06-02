@@ -279,13 +279,42 @@ def _openai_client(provider: str) -> OpenAI:
     raise ValueError(f"Unknown provider: {provider}")
 
 
+# ── Raw HTTP call (guaranteed timeout, no SDK issues) ─────────────────────────
+
+def _openrouter_call(model: str, messages: list, tools: list | None = None) -> dict:
+    """
+    Direct requests call to OpenRouter — hard 15s timeout, no SDK wrapping.
+    Returns the raw API response dict.
+    """
+    payload: dict = {
+        "model":       model,
+        "messages":    messages,
+        "temperature": 0.1,
+        "max_tokens":  400,
+    }
+    if tools:
+        payload["tools"]       = tools
+        payload["tool_choice"] = "auto"
+
+    resp = _req.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+            "Content-Type":  "application/json",
+            "HTTP-Referer":  "https://f1-event-intelligence.streamlit.app",
+            "X-Title":       "F1 Event Intelligence",
+        },
+        json=payload,
+        timeout=15,   # hard timeout — always respected by requests
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 # ── Agentic loop ───────────────────────────────────────────────────────────────
 
 def _function_calling_loop(question: str, history: list[dict], provider: str) -> tuple[str, list[str]]:
-    # For OpenRouter, try models in order until one works (auto-fallback on 429)
     model_candidates = OPENROUTER_MODELS if provider == "openrouter" else [GROQ_MODEL]
-    client = _openai_client(provider)
-    model  = model_candidates[0]   # will be overwritten on retry
 
     messages: list[dict] = [{"role": "system", "content": SYSTEM}]
     for m in history[-6:]:
@@ -295,51 +324,66 @@ def _function_calling_loop(question: str, history: list[dict], provider: str) ->
 
     tools_called: list[str] = []
 
-    # Try each model candidate — move to next on 429 rate-limit
-    from openai import RateLimitError
     for candidate in model_candidates:
-        model = candidate
-        msgs  = list(messages)   # fresh copy per model attempt
+        msgs = list(messages)
 
         try:
-            for _ in range(5):   # max 5 tool-call rounds per model
-                resp   = client.chat.completions.create(
-                    model=model,
-                    messages=msgs,
-                    tools=TOOLS,
-                    tool_choice="auto",
-                    temperature=0.1,
-                    max_tokens=400,  # keep responses concise and fast
-                )
-                choice = resp.choices[0]
-                msg    = choice.message
-                msgs.append(msg)
+            for _ in range(5):   # max 5 tool-call rounds
+                if provider == "openrouter":
+                    data   = _openrouter_call(candidate, msgs, TOOLS)
+                    choice = data["choices"][0]
+                    raw    = choice["message"]
+                    # Normalise to simple dict
+                    content    = raw.get("content") or ""
+                    tool_calls = raw.get("tool_calls") or []
+                    msgs.append(raw)   # append raw dict to history
+                else:
+                    # Groq via OpenAI SDK (fast, reliable)
+                    client = _openai_client(provider)
+                    resp   = client.chat.completions.create(
+                        model=GROQ_MODEL, messages=msgs, tools=TOOLS,
+                        tool_choice="auto", temperature=0.1, max_tokens=400,
+                    )
+                    sdk_msg    = resp.choices[0].message
+                    content    = sdk_msg.content or ""
+                    tool_calls = sdk_msg.tool_calls or []
+                    msgs.append(sdk_msg)
 
-                if not msg.tool_calls:
-                    return (msg.content or "").strip(), tools_called
+                if not tool_calls:
+                    return content.strip(), tools_called
 
-                for tc in msg.tool_calls:
-                    args   = json.loads(tc.function.arguments)
-                    label  = f"{tc.function.name}({json.dumps(args, ensure_ascii=False)[:60]}) [{model.split('/')[1][:20]}]"
-                    result = _execute(tc.function.name, args)
+                # Execute each tool call
+                for tc in tool_calls:
+                    if provider == "openrouter":
+                        tc_id  = tc["id"]
+                        name   = tc["function"]["name"]
+                        args   = json.loads(tc["function"]["arguments"])
+                    else:
+                        tc_id  = tc.id
+                        name   = tc.function.name
+                        args   = json.loads(tc.function.arguments)
+
+                    short_model = candidate.split("/")[-1][:18]
+                    label  = f"{name}({json.dumps(args, ensure_ascii=False)[:50]}) [{short_model}]"
+                    result = _execute(name, args)
                     tools_called.append(label)
-                    msgs.append({
-                        "role":         "tool",
-                        "tool_call_id": tc.id,
-                        "content":      result,
-                    })
+                    msgs.append({"role": "tool", "tool_call_id": tc_id, "content": result})
 
             return "Trop d'appels d'outils — réessayez.", tools_called
 
-        except RateLimitError:
-            continue   # try next model
+        except _req.exceptions.Timeout:
+            continue   # timeout → try next model
+        except _req.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 429:
+                continue   # rate-limited → try next model
+            return f"Erreur réseau : {e}", tools_called
         except Exception as e:
             err = str(e)
-            if "timeout" in err.lower() or "timed out" in err.lower():
-                continue   # timeout → try next model
+            if "rate" in err.lower() or "429" in err or "timeout" in err.lower():
+                continue
             return f"Erreur : {err[:120]}", tools_called
 
-    return "Modèles indisponibles ou trop lents — réessayez dans 30 s.", tools_called
+    return "Tous les modèles sont indisponibles — réessayez dans 30 s.", tools_called
 
 
 def _gemini_rag(question: str, history: list[dict]) -> tuple[str, list[str]]:
