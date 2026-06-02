@@ -116,14 +116,39 @@ _CURRENCY_KW  = ("chf", "eur", "usd", "franc", "currency", "monnaie",
 
 def fetch_context(question: str) -> tuple[str, list[str]]:
     """
-    Fetch relevant F1 data in < 1s based on question keywords.
-    Returns (context_string, list_of_sources).
+    Fetch relevant F1 data in < 1s.
+    Base context (always): full race calendar + driver standings top 5.
+    Additional: race results, constructor standings, FX, Wikipedia — if relevant.
     """
     q       = question.lower()
     parts:   list[str] = []
     sources: list[str] = []
 
-    # Driver standings — almost always useful
+    # ── Always: full race calendar (country, circuit, date, winner per race) ──
+    # This answers location/date/venue questions in any language without keyword matching.
+    try:
+        races = _jolpica("2024/races/")["RaceTable"]["Races"]
+        winners_raw = _jolpica("2024/results/1/")["RaceTable"]["Races"]
+        winner_by_round = {
+            int(r["round"]): f"{r['Results'][0]['Driver']['givenName']} {r['Results'][0]['Driver']['familyName']} ({r['Results'][0]['Constructor']['name']})"
+            for r in winners_raw if r.get("Results")
+        }
+        calendar = [{
+            "round":   r["round"],
+            "name":    r["raceName"],
+            "circuit": r["Circuit"]["circuitName"],
+            "country": r["Circuit"]["Location"]["country"],
+            "city":    r["Circuit"]["Location"]["locality"],
+            "date":    r["date"],
+            "winner":  winner_by_round.get(int(r["round"]), "TBD"),
+        } for r in races]
+        parts.append("2024 F1 Calendar (all 24 races with circuit, country, city, date, winner): "
+                     + json.dumps(calendar))
+        sources.append("Jolpica — race_calendar(2024) with winners")
+    except Exception:
+        pass
+
+    # ── Always: driver standings top 5 ───────────────────────────────────────
     try:
         sl = _jolpica("2024/driverstandings/")["StandingsTable"]["StandingsLists"]
         if sl:
@@ -173,19 +198,7 @@ def fetch_context(question: str) -> tuple[str, list[str]]:
                 pass
             break
 
-    # Full calendar if asked about schedule/dates
-    if any(w in q for w in _CALENDAR_KW):
-        try:
-            races = _jolpica("2024/races/")["RaceTable"]["Races"]
-            parts.append("2024 F1 Calendar: " + json.dumps([{
-                "round":   r["round"],
-                "name":    r["raceName"],
-                "country": r["Circuit"]["Location"]["country"],
-                "date":    r["date"],
-            } for r in races]))
-            sources.append("Jolpica — race_calendar(2024)")
-        except Exception:
-            pass
+    # (calendar already in base context above)
 
     # Exchange rates
     if any(w in q for w in _CURRENCY_KW):
