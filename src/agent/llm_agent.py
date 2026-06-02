@@ -1,13 +1,16 @@
 """
-RAG (Retrieval-Augmented Generation) agent.
+Agentic LLM layer with real function calling.
 
-For every user question:
-  1. Search Wikipedia live (always)
-  2. Fetch live exchange rates if the question involves money/currency
-  3. Inject the fetched data into the LLM context
-  4. LLM answers ONLY from what was retrieved — nothing hardcoded
+Primary:  OpenRouter + Qwen3 (free, works on Streamlit Cloud)
+Fallback: Groq + Llama-3.3-70b (free, function calling supported)
+Both use the OpenAI SDK — same code, different base_url.
 
-Nothing is pre-stored. Every response is grounded in live API calls.
+The LLM sees the tool list, decides which to call, we execute,
+it synthesises. Nothing hardcoded — all data fetched at runtime.
+
+Setup:
+  Get a free OpenRouter key at https://openrouter.ai (no CC)
+  Add to .env:  OPENROUTER_API_KEY=sk-or-...
 """
 
 from __future__ import annotations
@@ -15,129 +18,226 @@ import os
 import json
 import requests as _req
 import streamlit as st
+from openai import OpenAI
 
-GEMINI_MODEL = "gemini-2.5-flash-lite"
-GROQ_MODEL   = "llama-3.3-70b-versatile"
+# ── Models ─────────────────────────────────────────────────────────────────────
+OPENROUTER_MODEL = "qwen/qwen3-30b-a3b:free"
+GROQ_MODEL       = "llama-3.3-70b-versatile"
+GEMINI_MODEL     = "gemini-2.5-flash-lite"
 
-MONEY_KEYWORDS = {
-    "budget", "cost", "price", "coût", "prix", "budget", "franc", "euro",
-    "chf", "eur", "usd", "qar", "dollar", "currency", "monnaie", "dépense",
-    "expense", "spend", "argent", "combien", "how much", "financement",
-}
+SYSTEM = (
+    "You are an F1 racing intelligence assistant with access to real-time data tools.\n"
+    "ALWAYS use your tools to answer — never rely on training data for statistics or results.\n"
+    "Answer in the user's language (French if they write French).\n"
+    "Be concise: 2–4 sentences for simple questions. Use **bold** for key numbers.\n"
+    "When a user mentions a race name (e.g. 'Monaco', 'Japan'), find its round number "
+    "from the calendar tool first if you don't already know it."
+)
 
 
-# ── Live data fetchers ─────────────────────────────────────────────────────────
+# ── Tool definitions ───────────────────────────────────────────────────────────
+TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_race_calendar",
+            "description": "Get the complete F1 race calendar for a year: round numbers, race names, circuits, countries, dates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "year": {"type": "integer", "description": "Season year, e.g. 2024"}
+                },
+                "required": ["year"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_race_results",
+            "description": "Get the top-10 finishing order, times and points for a specific Grand Prix.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "year":  {"type": "integer"},
+                    "round": {"type": "integer", "description": "Round number (1–24). Use get_race_calendar first if unsure."},
+                },
+                "required": ["year", "round"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_driver_standings",
+            "description": "Get the Drivers' World Championship standings (points, wins) for a season.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "year": {"type": "integer"}
+                },
+                "required": ["year"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_constructor_standings",
+            "description": "Get the Constructors' World Championship standings for a season.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "year": {"type": "integer"}
+                },
+                "required": ["year"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_exchange_rates",
+            "description": "Get current live CHF exchange rates from open.er-api.com.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "currencies": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "ISO currency codes, e.g. ['USD', 'EUR', 'GBP', 'JPY']",
+                    }
+                },
+                "required": ["currencies"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_wikipedia",
+            "description": "Search Wikipedia for information about an F1 driver, team, circuit, or race.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query, e.g. 'Max Verstappen career'"}
+                },
+                "required": ["query"],
+            },
+        },
+    },
+]
+
+
+# ── Tool execution ─────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _wiki_fetch(query: str) -> str:
-    """Search Wikipedia and return the top article summary."""
-    headers = {"User-Agent": "GenevaEventDashboard/1.0 (portfolio; python-requests)"}
+def _jolpica(path: str) -> dict:
+    resp = _req.get(f"https://api.jolpi.ca/ergast/f1/{path}",
+                    params={"format": "json", "limit": 30}, timeout=15)
+    resp.raise_for_status()
+    return resp.json()["MRData"]
 
-    search = _req.get(
-        "https://en.wikipedia.org/w/api.php",
-        params={"action": "query", "list": "search", "srsearch": query,
-                "srlimit": 2, "format": "json", "srnamespace": 0},
-        headers=headers, timeout=10,
-    ).json().get("query", {}).get("search", [])
 
-    if not search:
-        return f"No Wikipedia results for: {query}"
+@st.cache_data(ttl=3600, show_spinner=False)
+def _er_api() -> dict:
+    return _req.get("https://open.er-api.com/v6/latest/CHF", timeout=10).json().get("rates", {})
 
-    title = search[0]["title"]
-    resp  = _req.get(
-        f"https://en.wikipedia.org/api/rest_v1/page/summary/{title.replace(' ', '_')}",
-        headers=headers, timeout=10,
-    )
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _wiki(query: str) -> str:
+    headers = {"User-Agent": "F1Dashboard/1.0 (portfolio; python-requests)"}
+    search  = _req.get("https://en.wikipedia.org/w/api.php",
+                       params={"action": "query", "list": "search", "srsearch": query,
+                               "srlimit": 1, "format": "json"},
+                       headers=headers, timeout=10).json()
+    results = search.get("query", {}).get("search", [])
+    if not results:
+        return "No Wikipedia result found."
+    title = results[0]["title"]
+    slug  = title.replace(" ", "_")
+    resp  = _req.get(f"https://en.wikipedia.org/api/rest_v1/page/summary/{slug}",
+                     headers=headers, timeout=10)
     if resp.status_code == 200:
-        data    = resp.json()
-        extract = data.get("extract", "")[:1000]
-        url     = data.get("content_urls", {}).get("desktop", {}).get("page", "")
-        return f"Source: {title} ({url})\n\n{extract}"
-    return f"Article '{title}' found but unavailable."
+        d = resp.json()
+        return f"{title}\n{d.get('extract','')[:600]}\n{d.get('content_urls',{}).get('desktop',{}).get('page','')}"
+    return f"Article '{title}' unavailable."
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def _rates_fetch() -> str:
-    """Fetch live CHF exchange rates."""
+def _execute(name: str, args: dict) -> str:
     try:
-        r = _req.get("https://open.er-api.com/v6/latest/CHF", timeout=10).json()
-        rates = r.get("rates", {})
-        lines = [f"1 CHF = {rates[c]:.4f} {c}" for c in ["EUR", "USD", "GBP", "QAR"] if c in rates]
-        return "\n".join(lines)
+        if name == "get_race_calendar":
+            races = _jolpica(f"{args['year']}/races/")["RaceTable"]["Races"]
+            return json.dumps([{
+                "round":   r["round"],
+                "name":    r["raceName"],
+                "circuit": r["Circuit"]["circuitName"],
+                "country": r["Circuit"]["Location"]["country"],
+                "date":    r["date"],
+            } for r in races])
+
+        if name == "get_race_results":
+            data = _jolpica(f"{args['year']}/{args['round']}/results/")["RaceTable"]["Races"]
+            if not data:
+                return "Results not available."
+            race    = data[0]
+            results = race.get("Results", [])
+            return json.dumps({
+                "race":    race["raceName"],
+                "date":    race["date"],
+                "circuit": race["Circuit"]["circuitName"],
+                "results": [{
+                    "pos":    r["position"],
+                    "driver": f"{r['Driver']['givenName']} {r['Driver']['familyName']}",
+                    "team":   r["Constructor"]["name"],
+                    "time":   r.get("Time", {}).get("time", r.get("status", "—")),
+                    "points": r.get("points", "0"),
+                } for r in results[:10]],
+            })
+
+        if name == "get_driver_standings":
+            lists = _jolpica(f"{args['year']}/driverstandings/")["StandingsTable"]["StandingsLists"]
+            if not lists:
+                return "Standings not available."
+            return json.dumps([{
+                "pos":    s["position"],
+                "driver": f"{s['Driver']['givenName']} {s['Driver']['familyName']}",
+                "team":   s["Constructors"][0]["name"],
+                "points": s["points"],
+                "wins":   s["wins"],
+            } for s in lists[0]["DriverStandings"]])
+
+        if name == "get_constructor_standings":
+            lists = _jolpica(f"{args['year']}/constructorstandings/")["StandingsTable"]["StandingsLists"]
+            if not lists:
+                return "Standings not available."
+            return json.dumps([{
+                "pos":    s["position"],
+                "team":   s["Constructor"]["name"],
+                "points": s["points"],
+                "wins":   s["wins"],
+            } for s in lists[0]["ConstructorStandings"]])
+
+        if name == "get_exchange_rates":
+            all_rates = _er_api()
+            rates     = {c: all_rates[c] for c in args.get("currencies", []) if c in all_rates}
+            return json.dumps({"base": "CHF", "rates": rates})
+
+        if name == "search_wikipedia":
+            return _wiki(args.get("query", ""))
+
+        return f"Unknown tool: {name}"
+
     except Exception as e:
-        return f"Exchange rate API unavailable: {e}"
-
-
-def _needs_rates(question: str) -> bool:
-    q = question.lower()
-    return any(kw in q for kw in MONEY_KEYWORDS)
-
-
-# ── Query enhancement ─────────────────────────────────────────────────────────
-
-_WHA  = ("wha", "world health assembly", "assemblée mondiale", "assemblée santé", "who assembly")
-_WW   = ("watches and wonders", "watches & wonders", "w&w", "montres genève", "horlog", "palexpo watch")
-_WTO  = ("wto", "omc", "mc12", "ministérielle", "ministerial conference", "world trade")
-
-_BUDGET_KW = ("budget", "coût", "cost", "financement", "composé", "composition",
-               "dépense", "funding", "argent", "prix", "how much", "combien coûte")
-_PART_KW   = ("participants", "délégués", "delegates", "combien de personnes",
-               "how many people", "attendance", "combien de gens")
-_COUNTRY_KW = ("pays", "countries", "nations", "membres", "members", "représentés")
-_VENUE_KW   = ("venue", "lieu", "endroit", "where", "palais", "bâtiment", "salle")
-_DURATION_KW = ("durée", "jours", "how long", "duration", "combien de jours", "long")
-
-
-def _event_query(q: str) -> str:
-    """Return the clean English Wikipedia article name for the detected event."""
-    if any(x in q for x in _WHA):  return "World Health Assembly"
-    if any(x in q for x in _WW):   return "Watches and Wonders Geneva"
-    if any(x in q for x in _WTO):  return "Twelfth WTO Ministerial Conference 2022 Geneva"
-    return ""
-
-
-def _extra_query(q: str) -> str | None:
-    """Return a second, more specific search for budget/org-level questions."""
-    if any(x in q for x in _BUDGET_KW):
-        if any(x in q for x in _WHA):  return "World Health Organization budget contributions"
-        if any(x in q for x in _WTO):  return "World Trade Organization secretariat funding"
-        if any(x in q for x in _WW):   return "Fondation de la Haute Horlogerie Geneva"
-    return None
-
-
-def _build_context(question: str) -> tuple[str, list[str]]:
-    """Fetch 1-2 Wikipedia articles + optional FX rates for the question."""
-    q       = question.lower()
-    sources: list[str] = []
-    blocks:  list[str] = []
-
-    # Primary Wikipedia search
-    primary = _event_query(q) or question[:100]
-    wiki1   = _wiki_fetch(primary)
-    sources.append(f"search_wikipedia('{primary}')")
-    blocks.append(f"## Wikipedia — {primary}\n{wiki1}")
-
-    # Secondary search for deep-topic questions
-    extra = _extra_query(q)
-    if extra:
-        wiki2 = _wiki_fetch(extra)
-        sources.append(f"search_wikipedia('{extra}')")
-        blocks.append(f"## Wikipedia — {extra}\n{wiki2}")
-
-    # Exchange rates
-    if _needs_rates(question):
-        rates = _rates_fetch()
-        sources.append("get_exchange_rates(CHF base) → open.er-api.com")
-        blocks.append(f"## Live exchange rates (CHF base)\n{rates}")
-
-    return "\n\n".join(blocks), sources
+        return f"Tool error: {e}"
 
 
 # ── Provider ───────────────────────────────────────────────────────────────────
 
 def _provider() -> str | None:
-    if os.getenv("GEMINI_API_KEY"): return "gemini"
-    if os.getenv("GROQ_API_KEY"):   return "groq"
+    if os.getenv("OPENROUTER_API_KEY"): return "openrouter"
+    if os.getenv("GROQ_API_KEY"):       return "groq"
+    if os.getenv("GEMINI_API_KEY"):     return "gemini"
     return None
 
 def is_available() -> bool:
@@ -145,78 +245,128 @@ def is_available() -> bool:
 
 def model_label() -> str:
     p = _provider()
-    if p == "gemini": return GEMINI_MODEL
-    if p == "groq":   return GROQ_MODEL
+    if p == "openrouter": return f"Qwen3-30B (OpenRouter)"
+    if p == "groq":       return f"Llama-3.3-70B (Groq)"
+    if p == "gemini":     return f"{GEMINI_MODEL} (Gemini)"
     return "none"
 
 
-# ── LLM call ──────────────────────────────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def _openai_client(provider: str) -> OpenAI:
+    if provider == "openrouter":
+        return OpenAI(
+            api_key=os.getenv("OPENROUTER_API_KEY"),
+            base_url="https://openrouter.ai/api/v1",
+            default_headers={
+                "HTTP-Referer": "https://f1-event-intelligence.streamlit.app",
+                "X-Title":      "F1 Event Intelligence",
+            },
+        )
+    if provider == "groq":
+        return OpenAI(
+            api_key=os.getenv("GROQ_API_KEY"),
+            base_url="https://api.groq.com/openai/v1",
+        )
+    raise ValueError(f"Unknown provider: {provider}")
 
-def _system(context: str) -> str:
-    return (
-        "You are a professional event intelligence assistant specialising in "
-        "Geneva international events.\n\n"
-        "Answer ONLY using the live data below. "
-        "If the data doesn't fully answer the question, say so honestly. "
-        "Answer in the user's language (French if they write French). "
-        "Be concise — one paragraph max. Use **bold** for key numbers.\n\n"
-        f"## Live data fetched for this question\n\n{context}"
-    )
+
+# ── Agentic loop ───────────────────────────────────────────────────────────────
+
+def _function_calling_loop(question: str, history: list[dict], provider: str) -> tuple[str, list[str]]:
+    model  = OPENROUTER_MODEL if provider == "openrouter" else GROQ_MODEL
+    client = _openai_client(provider)
+
+    messages: list[dict] = [{"role": "system", "content": SYSTEM}]
+    for m in history[-6:]:
+        if m["role"] in ("user", "assistant") and m.get("content"):
+            messages.append({"role": m["role"], "content": m["content"]})
+    messages.append({"role": "user", "content": question})
+
+    tools_called: list[str] = []
+
+    for _ in range(6):          # max 6 tool-call rounds
+        resp   = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=TOOLS,
+            tool_choice="auto",
+            temperature=0.1,
+            max_tokens=600,
+        )
+        choice = resp.choices[0]
+        msg    = choice.message
+
+        # Always append the assistant turn (with or without tool_calls)
+        messages.append(msg)
+
+        if not msg.tool_calls:
+            return (msg.content or "").strip(), tools_called
+
+        # Execute each requested tool
+        for tc in msg.tool_calls:
+            args   = json.loads(tc.function.arguments)
+            label  = f"{tc.function.name}({json.dumps(args, ensure_ascii=False)[:60]})"
+            result = _execute(tc.function.name, args)
+            tools_called.append(label)
+            messages.append({
+                "role":         "tool",
+                "tool_call_id": tc.id,
+                "content":      result,
+            })
+
+    return "Je n'ai pas pu répondre après plusieurs appels d'outils.", tools_called
 
 
-def _gemini(question: str, history: list[dict], system: str) -> str:
-    key = os.getenv("GEMINI_API_KEY")
-    url = (f"https://generativelanguage.googleapis.com/v1beta/models/"
-           f"{GEMINI_MODEL}:generateContent?key={key}")
+def _gemini_rag(question: str, history: list[dict]) -> tuple[str, list[str]]:
+    """Gemini fallback — pre-fetch context and inject (no native function calling)."""
+    key  = os.getenv("GEMINI_API_KEY")
+    url  = (f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{GEMINI_MODEL}:generateContent?key={key}")
+
+    # Pre-fetch relevant data
+    tools_called: list[str] = []
+    context_parts: list[str] = []
+
+    q = question.lower()
+    if any(w in q for w in ["standing", "classement", "champion", "points", "winner", "vainqueur", "résultat", "result", "win", "gagn"]):
+        dr = _jolpica("2024/driverstandings/")["StandingsTable"]["StandingsLists"]
+        if dr:
+            tools_called.append("get_driver_standings(2024)")
+            context_parts.append("Driver standings 2024: " + json.dumps(
+                [{"pos": s["position"], "driver": f"{s['Driver']['givenName']} {s['Driver']['familyName']}", "pts": s["points"]} for s in dr[0]["DriverStandings"][:5]]
+            ))
+
+    if any(w in q for w in ["race", "course", "grand prix", "monaco", "bahrain", "japan", "uk", "circuit"]):
+        wiki_q = question[:80]
+        context_parts.append("Wikipedia: " + _wiki(wiki_q))
+        tools_called.append(f"search_wikipedia('{wiki_q[:50]}')")
+
+    system = (SYSTEM + "\n\n## Live data\n" + "\n\n".join(context_parts)) if context_parts else SYSTEM
 
     contents = []
     for m in history[-6:]:
         if m["role"] in ("user", "assistant") and m.get("content"):
-            role = "model" if m["role"] == "assistant" else "user"
-            contents.append({"role": role, "parts": [{"text": m["content"]}]})
+            contents.append({"role": "model" if m["role"] == "assistant" else "user",
+                             "parts": [{"text": m["content"]}]})
     contents.append({"role": "user", "parts": [{"text": question}]})
 
-    resp = _req.post(url, json={
+    resp  = _req.post(url, json={
         "system_instruction": {"parts": [{"text": system}]},
         "contents": contents,
         "generationConfig": {"maxOutputTokens": 400, "temperature": 0.2},
     }, timeout=25)
     resp.raise_for_status()
-
     parts = resp.json()["candidates"][0]["content"].get("parts", [])
-    return "".join(p.get("text", "") for p in parts).strip()
-
-
-def _groq(question: str, history: list[dict], system: str) -> str:
-    from groq import Groq
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    messages = [{"role": "system", "content": system}]
-    for m in history[-6:]:
-        if m["role"] in ("user", "assistant") and m.get("content"):
-            messages.append({"role": m["role"], "content": m["content"]})
-    messages.append({"role": "user", "content": question})
-    resp = client.chat.completions.create(
-        model=GROQ_MODEL, messages=messages, max_tokens=400, temperature=0.2,
-    )
-    return resp.choices[0].message.content.strip()
+    return "".join(p.get("text", "") for p in parts).strip(), tools_called
 
 
 # ── Public entry point ─────────────────────────────────────────────────────────
 
 def ask(question: str, history: list[dict]) -> tuple[str, list[str]]:
-    """
-    Fetch live context from APIs, inject into LLM, return (response, sources).
-    Nothing is hardcoded — data is always retrieved at call time.
-    """
-    context, sources = _build_context(question)
-    system = _system(context)
-
+    """Route to the best available provider and run the agentic loop."""
     p = _provider()
+    if p in ("openrouter", "groq"):
+        return _function_calling_loop(question, history, p)
     if p == "gemini":
-        text = _gemini(question, history, system)
-    elif p == "groq":
-        text = _groq(question, history, system)
-    else:
-        raise RuntimeError("No LLM key configured.")
-
-    return text, sources
+        return _gemini_rag(question, history)
+    raise RuntimeError("No LLM key configured.")
