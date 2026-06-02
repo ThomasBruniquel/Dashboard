@@ -21,7 +21,13 @@ import streamlit as st
 from openai import OpenAI
 
 # ── Models ─────────────────────────────────────────────────────────────────────
-OPENROUTER_MODEL = "qwen/qwen3-30b-a3b:free"
+# Free models tried in order — automatic fallback on 429 rate-limit
+OPENROUTER_MODELS = [
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-4-31b-it:free",
+]
+OPENROUTER_MODEL = OPENROUTER_MODELS[0]   # displayed in UI
 GROQ_MODEL       = "llama-3.3-70b-versatile"
 GEMINI_MODEL     = "gemini-2.5-flash-lite"
 
@@ -273,8 +279,10 @@ def _openai_client(provider: str) -> OpenAI:
 # ── Agentic loop ───────────────────────────────────────────────────────────────
 
 def _function_calling_loop(question: str, history: list[dict], provider: str) -> tuple[str, list[str]]:
-    model  = OPENROUTER_MODEL if provider == "openrouter" else GROQ_MODEL
+    # For OpenRouter, try models in order until one works (auto-fallback on 429)
+    model_candidates = OPENROUTER_MODELS if provider == "openrouter" else [GROQ_MODEL]
     client = _openai_client(provider)
+    model  = model_candidates[0]   # will be overwritten on retry
 
     messages: list[dict] = [{"role": "system", "content": SYSTEM}]
     for m in history[-6:]:
@@ -284,37 +292,49 @@ def _function_calling_loop(question: str, history: list[dict], provider: str) ->
 
     tools_called: list[str] = []
 
-    for _ in range(6):          # max 6 tool-call rounds
-        resp   = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-            temperature=0.1,
-            max_tokens=600,
-        )
-        choice = resp.choices[0]
-        msg    = choice.message
+    # Try each model candidate — move to next on 429 rate-limit
+    from openai import RateLimitError
+    for candidate in model_candidates:
+        model = candidate
+        msgs  = list(messages)   # fresh copy per model attempt
 
-        # Always append the assistant turn (with or without tool_calls)
-        messages.append(msg)
+        try:
+            for _ in range(6):   # max 6 tool-call rounds per model
+                resp   = client.chat.completions.create(
+                    model=model,
+                    messages=msgs,
+                    tools=TOOLS,
+                    tool_choice="auto",
+                    temperature=0.1,
+                    max_tokens=600,
+                )
+                choice = resp.choices[0]
+                msg    = choice.message
+                msgs.append(msg)
 
-        if not msg.tool_calls:
-            return (msg.content or "").strip(), tools_called
+                if not msg.tool_calls:
+                    return (msg.content or "").strip(), tools_called
 
-        # Execute each requested tool
-        for tc in msg.tool_calls:
-            args   = json.loads(tc.function.arguments)
-            label  = f"{tc.function.name}({json.dumps(args, ensure_ascii=False)[:60]})"
-            result = _execute(tc.function.name, args)
-            tools_called.append(label)
-            messages.append({
-                "role":         "tool",
-                "tool_call_id": tc.id,
-                "content":      result,
-            })
+                for tc in msg.tool_calls:
+                    args   = json.loads(tc.function.arguments)
+                    label  = f"{tc.function.name}({json.dumps(args, ensure_ascii=False)[:60]}) [{model.split('/')[1][:20]}]"
+                    result = _execute(tc.function.name, args)
+                    tools_called.append(label)
+                    msgs.append({
+                        "role":         "tool",
+                        "tool_call_id": tc.id,
+                        "content":      result,
+                    })
 
-    return "Je n'ai pas pu répondre après plusieurs appels d'outils.", tools_called
+            return "Trop d'appels d'outils — réessayez.", tools_called
+
+        except RateLimitError:
+            # Try next model in the list
+            continue
+        except Exception as e:
+            return f"Erreur : {e}", tools_called
+
+    return "Tous les modèles sont rate-limités — réessayez dans 30 secondes.", tools_called
 
 
 def _gemini_rag(question: str, history: list[dict]) -> tuple[str, list[str]]:
